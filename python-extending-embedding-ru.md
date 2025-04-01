@@ -193,7 +193,37 @@ spam_system(PyObject *self, PyObject *args)
 ```
 
 ## 1.3. Возвращение к примеру
-Текст для подраздела 1.1.
+Возвращаясь к нашему примеру функции, теперь вы должны понять следующую инструкцию:
+
+```c
+if (!PyArg_ParseTuple(args, "s", &command))
+    return NULL;
+```
+
+Он вернёт `NULL` (индикатор ошибки для функций, возвращающих указатели на объекты), если в списке аргументов обнаружена ошибка, полагаясь на исключение, установленное функцией [PyArg_ParseTuple()](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTuple). В противном случае строковое значение аргумента копируется в локальную переменную <span style="font-family: Consolas, sans-serif;">command</span>. Это присваивание указателя, и вам не следует изменять строку, на которую он указывает (поэтому в стандартном C переменная command должна быть правильно объявлена как `const char *command`).
+
+Следующее выражение — это вызов функции Unix <span style="font-family: Consolas, sans-serif;">system()</span>, в который передаётся строка, полученная нами из [PyArg_ParseTuple()](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTuple):
+
+```c
+sts = system(command);
+```
+
+Наша функция <span style="font-family: Consolas, sans-serif;">spam.system()</span> должна вернуть значение переменной <span style="font-family: Consolas, sans-serif;">sts</span> в виде объекта Python. Это выполняется с помощью функции [PyLong_FromLong()](https://docs.python.org/3/c-api/long.html#c.PyLong_FromLong).
+
+```c
+return PyLong_FromLong(sts);
+```
+
+В этом случае она вернёт объект целого числа. (Да, даже целые числа являются объектами в куче в Python!)
+
+Если у вас есть C-функция, которая не возвращает полезного значения (функция, возвращающая `void`), соответствующая Python-функция должна вернуть None. Для этого используется следующий идиоматический приём (который реализован через макрос [Py_RETURN_NONE](https://docs.python.org/3/c-api/none.html#c.Py_RETURN_NONE)):
+
+```c
+Py_INCREF(Py_None);
+return Py_None;
+```
+
+[Py_None](https://docs.python.org/3/c-api/none.html#c.Py_RETURN_NONE) — это C-имя для специального объекта Python `None`. Это настоящий объект Python, а не указатель `NULL`, который обычно означает «ошибку» в большинстве контекстов, как мы уже видели.
 
 ## 1.4. Таблица методов модуля и функция инициализации
 Текст для подраздела 1.1.
