@@ -226,8 +226,107 @@ return Py_None;
 [Py_None](https://docs.python.org/3/c-api/none.html#c.Py_RETURN_NONE) — это C-имя для специального объекта Python `None`. Это настоящий объект Python, а не указатель `NULL`, который обычно означает «ошибку» в большинстве контекстов, как мы уже видели.
 
 ## 1.4. Таблица методов модуля и функция инициализации
-Текст для подраздела 1.1.
+Рассмотрим, как функция <span style="font-family: Consolas, sans-serif;">spam_system()</span> вызывается из Python-программ. Для начала нам нужно перечислить её имя и адрес в «таблице методов»:
 
+```c
+static PyMethodDef SpamMethods[] = {
+    ...
+    {"system",  spam_system, METH_VARARGS,
+     "Execute a shell command."},
+    ...
+    {NULL, NULL, 0, NULL}        /* Sentinel */
+};
+```
+
+Обратите внимание на третий элемент (`METH_VARARGS`). Это флаг, который сообщает интерпретатору, какую конвенцию вызова следует использовать для C-функции. Обычно это всегда должно быть `METH_VARARGS` или `METH_VARARGS | METH_KEYWORDS`; значение `0` означает, что используется устаревшая версия [PyArg_ParseTuple()](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTuple).
+
+При использовании только `METH_VARARGS` функция должна ожидать, что параметры на уровне Python будут переданы в виде кортежа, который можно обработать с помощью [PyArg_ParseTuple()](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTuple); более подробную информацию об этой функции можно найти ниже.
+
+Бит [METH_KEYWORDS](https://docs.python.org/3/c-api/structures.html#c.METH_KEYWORDS) может быть установлен в третьем поле, если аргументы-ключевые слова должны быть переданы функции. В этом случае C-функция должна принимать третий параметр типа `PyObject *`, который будет представлять собой словарь ключевых слов. Для парсинга аргументов такой функции используйте [PyArg_ParseTupleAndKeywords()](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTupleAndKeywords).
+
+Таблица методов должна быть указана в структуре определения модуля:
+
+```c
+static struct PyModuleDef spammodule = {
+    PyModuleDef_HEAD_INIT,
+    "spam",   /* name of module */
+    spam_doc, /* module documentation, may be NULL */
+    -1,       /* size of per-interpreter state of the module,
+                 or -1 if the module keeps state in global variables. */
+    SpamMethods
+};
+```
+
+Эта структура, в свою очередь, должна быть передана интерпретатору в функции инициализации модуля. Функция инициализации должна называться <span style="font-family: Consolas, sans-serif;">PyInit_name()</span>, где *name* — это имя модуля, и должна быть единственным нестатическим элементом, определённым в файле модуля:
+
+```c
+PyMODINIT_FUNC
+PyInit_spam(void)
+{
+    return PyModule_Create(&spammodule);
+}
+```
+
+Обратите внимание, что [PyMODINIT_FUNC](https://docs.python.org/3/c-api/intro.html#c.PyMODINIT_FUNC) объявляет функцию с типом возвращаемого значения `PyObject *`, указывает на любые специальные декларации связи, требуемые платформой, и для C++ объявляет функцию как `extern "C"`.
+
+Когда программа Python импортирует модуль <span style="font-family: Consolas, sans-serif;">spam</span> в первый раз, вызывается функция <span style="font-family: Consolas, sans-serif;">PyInit_spam()</span>. (См. ниже комментарии о встраивании Python.) Эта функция вызывает [PyModule_Create()](https://docs.python.org/3/c-api/module.html#c.PyModule_Create), которая возвращает объект модуля, и вставляет встроенные объекты функций в только что созданный модуль на основе таблицы (массива структур [PyMethodDef](https://docs.python.org/3/c-api/structures.html#c.PyMethodDef)), найденной в определении модуля. [PyModule_Create()](https://docs.python.org/3/c-api/module.html#c.PyModule_Create) возвращает указатель на объект модуля, который она создаёт. Она может завершиться с фатальной ошибкой в случае некоторых ошибок или вернуть `NULL`, если модуль не может быть инициализирован должным образом. Функция инициализации должна вернуть объект модуля своему вызывающему, чтобы он был вставлен в `sys.modules`.
+
+При встраивании Python функция <span style="font-family: Consolas, sans-serif;">PyInit_spam()</span> не вызывается автоматически, если только нет записи в таблице <span style="font-family: Consolas, sans-serif;">PyImport_Inittab</span>. Чтобы добавить модуль в таблицу инициализации, используйте [PyImport_AppendInittab()](https://docs.python.org/3/c-api/import.html#c.PyImport_AppendInittab), а затем, при необходимости, выполните импорт модуля:
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+int
+main(int argc, char *argv[])
+{
+    PyStatus status;
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    /* Добавляем встроенный модуль до вызова Py_Initialize */
+    if (PyImport_AppendInittab("spam", PyInit_spam) == -1) {
+        fprintf(stderr, "Error: could not extend in-built modules table\n");
+        exit(1);
+    }
+
+    /* Передаём argv[0] интерпретатору Python */
+    status = PyConfig_SetBytesString(&config, &config.program_name, argv[0]);
+    if (PyStatus_Exception(status)) {
+        goto exception;
+    }
+
+    /* Инициализировать интерпретатор Python.  Обязательно.
+       Если этот шаг не удастся - критическая ошибка. */
+    status = Py_InitializeFromConfig(&config);
+    if (PyStatus_Exception(status)) {
+        goto exception;
+    }
+    PyConfig_Clear(&config);
+
+    /* Дополнительно импортируем модуль; альтернативно,
+       импорт может быть отложен до тех пор, пока встроенный скрипт не импортирует его. */
+    PyObject *pmodule = PyImport_ImportModule("spam");
+    if (!pmodule) {
+        PyErr_Print();
+        fprintf(stderr, "Error: could not import module 'spam'\n");
+    }
+
+    // ... используем Python C API ...
+
+    return 0;
+
+  exception:
+     PyConfig_Clear(&config);
+     Py_ExitStatusException(status);
+}
+```
+
+> **Примечание**: Удаление записей из `sys.modules` или импорт компилированных модулей в несколько интерпретаторов внутри процесса (или после вызова `fork()`, если не было промежуточного вызова `exec()`) может вызвать проблемы для некоторых расширений. Авторы расширений должны проявлять осторожность при инициализации внутренних структур данных.
+
+Более подробный пример модуля включён в исходный код Python в файле `Modules/xxmodule.c`. Этот файл можно использовать как шаблон или просто рассматривать в качестве примера.
+
+> **Примечание**: В отличие от нашего примера с `spam`, `xxmodule` использует *многоэтапную инициализацию* (нововведение в Python 3.5), где структура PyModuleDef возвращается из `PyInit_spam`, а создание модуля остаётся на усмотрение механизма импорта. Для подробностей о многоэтапной инициализации см. [PEP 489](https://peps.python.org/pep-0489/).
 ## 1.5. Компиляция и компоновка
 Текст для подраздела 1.1.
 
