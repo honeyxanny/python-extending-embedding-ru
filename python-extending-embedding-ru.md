@@ -2670,10 +2670,33 @@ if (!PyObject_TypeCheck(some_object, &MyType)) {
 ```
 
 # 4. Сборка расширений на C и C++
-Текст для раздела 1.
+C-расширение для CPython — это динамически подключаемая библиотека (например, файл `.so` в Linux или `.pyd` в Windows), которая экспортирует *функцию инициализации*.
+
+Чтобы модуль можно было импортировать, динамическая библиотека должна находиться в [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PYTHONPATH</span>](https://docs.python.org/3/using/cmdline.html#envvar-PYTHONPATH) и иметь имя, соответствующее названию модуля, с соответствующим расширением. При использовании setuptools правильное имя файла генерируется автоматически.
+
+Функция инициализации имеет следующую сигнатуру:
+
+<span style="font-family: Consolas, sans-serif;">[PyObject](https://docs.python.org/3/c-api/structures.html#c.PyObject) <b>*PyInit_modulename</b>(void)</span>
+
+Она возвращает либо полностью инициализированный модуль, либо экземпляр [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyModuleDef</span>](https://docs.python.org/3/c-api/module.html#c.PyModuleDef). Подробности см. в разделе [<u>Инициализация C-модулей</u>](https://docs.python.org/3/c-api/module.html#initializing-modules).
+
+Для модулей с именами, содержащими только ASCII-символы, функция должна называться `PyInit_<modulename>`, где `<modulename>` заменяется на имя модуля.При использовании [<u>многофазовой инициализации</u>](https://docs.python.org/3/c-api/module.html#multi-phase-initialization) допустимы имена модулей с не-ASCII символами. В этом случае функция инициализации называется `PyInitU_<modulename>`, где `<modulename>` кодируется с использованием Punycode с заменой дефисов на подчёркивания.
+
+```python
+def initfunc_name(name):
+    try:
+        suffix = b'_' + name.encode('ascii')
+    except UnicodeEncodeError:
+        suffix = b'U_' + name.encode('punycode').replace(b'-', b'_')
+    return b'PyInit' + suffix
+```
+
+Можно экспортировать несколько модулей из одной общей библиотеки, определив несколько функций инициализации. Однако их импорт требует использования символических ссылок или пользовательского загрузчика, так как по умолчанию обнаруживается только функция, соответствующая имени файла. Подробности см. в разделе «Несколько модулей в одной библиотеке» в [<b><u>PEP 489</u></b>](https://peps.python.org/pep-0489/).
 
 ## 4.1. Сборка расширений на C и C++ с помощью setuptools
-Текст для подраздела 1.1.
+Python 3.12 и новее больше не включают distutils. Рекомендуется обратиться к документации setuptools:
+<u>https://setuptools.readthedocs.io/en/latest/setuptools.html</u>
+для получения информации о сборке и распространении C/C++ расширений с помощью setuptools.
 
 # 5. Сборка расширений на C и C++ в Windows
 Текст для раздела 1.
