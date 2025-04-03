@@ -41,6 +41,7 @@
   - [3.1. Завершение и освобождение памяти](#31-завершение-и-освобождение-памяти)
   - [3.2. Представление объекта](#32-представление-объекта)
   - [3.3. Управление атрибутами](#33-управление-атрибутами)
+    - [3.3.1 Управление атрибутами общего типа](#331-управление-атрибутами-общего-типа)
   - [3.4. Сравнение объектов](#34-сравнение-объектов)
   - [3.5. Поддержка абстрактных протоколов](#35-поддержка-абстрактных-протоколов)
   - [3.6. Поддержка слабых ссылок](#36-поддержка-слабых-ссылок)
@@ -908,22 +909,1297 @@ PyInit_client(void)
 Наконец, следует упомянуть, что капсулы (Capsules) предоставляют дополнительную функциональность, особенно полезную для управления памятью при выделении и освобождении указателей, хранящихся в капсуле. Подробности описаны в Python/C API Reference Manual в разделе, посвящённом [капсулам](https://docs.python.org/3/c-api/capsule.html#capsules), а также в реализации капсул (файлы `Include/pycapsule.h` и `Objects/pycapsule.c` в исходном коде Python).
 
 # 2. Определение типов расширений: учебное пособие
-Текст для раздела 1.
+Python позволяет разработчику модулей расширений на C определять новые типы, которыми можно управлять из Python-кода, подобно встроенным типам [str](https://docs.python.org/3/library/stdtypes.html#str) и [list](https://docs.python.org/3/library/stdtypes.html#list). Код для всех типов расширений следует определённому шаблону, но перед началом работы необходимо разобраться в некоторых деталях. Данный документ представляет собой вводное руководство по этой теме.
 
 ## 2.1. Основы
-Текст для подраздела 1.1.
+Интерпретатор [CPython](https://docs.python.org/3/glossary.html#term-CPython) рассматривает все объекты Python как переменные типа [PyObject](https://docs.python.org/3/c-api/structures.html#c.PyObject)*, который служит «базовым типом» для всех объектов Python. Сама структура [PyObject](https://docs.python.org/3/c-api/structures.html#c.PyObject) содержит только [счётчик ссылок](https://docs.python.org/3/glossary.html#term-reference-count) ([reference count](https://docs.python.org/3/glossary.html#term-reference-count)) объекта и указатель на его «объект типа». Именно здесь происходит основное действие: объект типа определяет, какие (C) функции будут вызваны интерпретатором, например, при поиске атрибута объекта, вызове метода или умножении на другой объект. Эти C-функции называются «методами типа» (type methods).
+
+Таким образом, для определения нового типа расширения необходимо создать новый объект типа.
+
+Такую концепцию проще всего объяснить на примере. Ниже представлен минимальный, но полный модуль расширения на C под названием <span style="font-family: Consolas, sans-serif;">Custom</span>, который определяет новый тип <span style="font-family: Consolas, sans-serif;">custom</span>:
+
+> **Примечание**: Здесь мы демонстрируем традиционный способ определения *статических* типов расширений. Этого должно быть достаточно для большинства случаев. C API также позволяет определять типы расширений с выделением памяти в куче с помощью функции [PyType_FromSpec()](https://docs.python.org/3/c-api/type.html#c.PyType_FromSpec), однако это не рассматривается в данном руководстве.
+
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+typedef struct {
+    PyObject_HEAD
+    /* Type-specific fields go here. */
+} CustomObject;
+
+static PyTypeObject CustomType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "custom.Custom",
+    .tp_doc = PyDoc_STR("Custom objects"),
+    .tp_basicsize = sizeof(CustomObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+};
+
+static PyModuleDef custommodule = {
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "custom",
+    .m_doc = "Example module that creates an extension type.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit_custom(void)
+{
+    PyObject *m;
+    if (PyType_Ready(&CustomType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&custommodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "Custom", (PyObject *) &CustomType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Пока что информации довольно много для восприятия сразу, но, надеюсь, некоторые моменты покажутся знакомыми из предыдущей главы. Этот файл определяет три основные вещи:
+
+1. Содержимое **объекта** <span style="font-family: Consolas, sans-serif;">Custom</span> определяется структурой `CustomObject`, которая создаётся для каждого экземпляра <span style="font-family: Consolas, sans-serif;">Custom</span>.
+2. Поведение **типа** <span style="font-family: Consolas, sans-serif;">Custom</span> определяется структурой `CustomType`, содержащей флаги и указатели на функции, которые интерпретатор использует при выполнении операций с объектом.
+3. Инициализация модуля <span style="font-family: Consolas, sans-serif;">custom</span> осуществляется функцией `PyInit_custom` и связанной с ней структурой `custommodule`.
+
+Начнём с первого пункта:
+
+```c
+typedef struct {
+    PyObject_HEAD
+} CustomObject;
+```
+
+Вот что содержит объект Custom. `PyObject_HEAD` - обязательный элемент в начале каждой структуры объекта, который определяет поле `ob_base` типа [PyObject](https://docs.python.org/3/c-api/structures.html#c.PyObject), содержащее указатель на объект типа, счётчик ссылок (доступ через макросы [Py_TYPE](https://docs.python.org/3/c-api/structures.html#c.Py_TYPE) и [Py_REFCNT](https://docs.python.org/3/c-api/refcounting.html#c.Py_REFCNT) соответственно). Этот макрос абстрагирует внутреннюю структуру и позволяет добавлять дополнительные поля в [отладочных сборках](https://docs.python.org/3/using/configure.html#debug-build).
+
+> **Примечание**: После макроса [PyObject_HEAD](https://docs.python.org/3/c-api/structures.html#c.PyObject_HEAD) в примере отсутствует точка с запятой. Будьте внимательны и не добавляйте её случайно — некоторые компиляторы выдадут ошибку.
+
+Разумеется, объекты обычно хранят дополнительные данные помимо стандартного шаблона `PyObject_HEAD`. Например, вот определение стандартного вещественного числа (float) в Python
+
+```c
+typedef struct {
+    PyObject_HEAD
+    double ob_fval;
+} PyFloatObject;
+```
+
+Второй пункт - это определение объекта типа.
+
+```c
+static PyTypeObject CustomType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "custom.Custom",
+    .tp_doc = PyDoc_STR("Custom objects"),
+    .tp_basicsize = sizeof(CustomObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = PyType_GenericNew,
+};
+```
+
+> **Примечание**: Рекомендуется использовать инициализаторы в стиле C99 (как показано выше), чтобы избежать перечисления всех полей [PyTypeObject](https://docs.python.org/3/c-api/type.html#c.PyTypeObject), которые вам не нужны и не зависеть от порядка объявления полей.
+
+Фактическое определение [PyTypeObject](https://docs.python.org/3/c-api/type.html#c.PyTypeObject) в `object.h` содержит значительно больше [полей](https://docs.python.org/3/c-api/typeobj.html#type-structs), чем приведённое выше. Оставшиеся поля будут автоматически заполнены нулями компилятором C, и общепринятой практикой является их явное указание только при необходимости.
+
+Разберём эту структуру по полям:
+
+```c
+.ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+```
+
+Эта строка является обязательным шаблонным кодом для инициализации поля `ob_base`, упомянутого выше.
+
+```c
+.tp_name = "custom.Custom",
+```
+
+Имя нашего типа. Оно будет использоваться в текстовом представлении объектов по умолчанию и в некоторых сообщениях об ошибках, например:
+
+```python
+>>> "" + custom.Custom()
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+TypeError: can only concatenate str (not "custom.Custom") to str
+```
+
+Обратите внимание, что имя должно быть составным (dotted name) и содержать как имя модуля, так и имя типа внутри модуля. В нашем случае модуль называется <span style="font-family: Consolas, sans-serif;">custom</span>, а тип - <span style="font-family: Consolas, sans-serif;">Custom</span>, поэтому мы задаём имя типа как <span style="font-family: Consolas, sans-serif;">custom.Custom.</span> Использование полного составного пути важно для обеспечения совместимости вашего типа с модулями [pydoc](https://docs.python.org/3/library/pydoc.html#module-pydoc) и [pickle](https://docs.python.org/3/library/pickle.html#module-pickle).
+
+```c
+.tp_basicsize = sizeof(CustomObject),
+.tp_itemsize = 0,
+```
+
+Это необходимо, чтобы Python знал, сколько памяти выделять при создании новых экземпляров <span style="font-family: Consolas, sans-serif;">Custom</span>. Поле [tp_itemsize](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_itemsize) используется только для объектов переменного размера, в остальных случаях должно быть равно нулю.
+
+> **Примечание**: Если вы хотите, чтобы ваш тип можно было наследовать в Python, и при этом он имеет тот же [<span style="font-family: Consolas, sans-serif;">tp_basicsize</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_basicsize), что и базовый тип, могут возникнуть проблемы с множественным наследованием. Python-подкласс вашего типа должен будет указать ваш тип первым в [<span style="font-family: Consolas, sans-serif;">\_\_bases\_\_</span>](https://docs.python.org/3/reference/datamodel.html#type.__bases__), иначе он не сможет вызвать метод [<span style="font-family: Consolas, sans-serif;">\_\_new\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__new__) вашего типа без ошибки. Этой проблемы можно избежать, если убедиться, что значение [<span style="font-family: Consolas, sans-serif;">tp_basicsize</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_basicsize) вашего типа больше, чем у базового типа. В большинстве случаев так и будет, поскольку базовым типом будет [<span style="font-family: Consolas, sans-serif;">object</span>](https://docs.python.org/3/library/functions.html#object) или вы будете добавлять новые поля данных к базовому типу, увеличивая его размер.
+
+Устанавливаем флаги класса в [Py_TPFLAGS_DEFAULT](https://docs.python.org/3/c-api/typeobj.html#c.Py_TPFLAGS_DEFAULT).
+
+```c
+.tp_flags = Py_TPFLAGS_DEFAULT,
+```
+
+Все типы должны включать эту константу в свои флаги. Она активирует все члены, определённые как минимум до Python 3.3. Если требуются дополнительные члены, необходимо использовать оператор OR с соответствующими флагами.
+
+Указываем строку документации для типа в [<span style="font-family: Consolas, sans-serif;">tp_doc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_doc).
+
+```c
+.tp_doc = PyDoc_STR("Custom objects"),
+```
+
+Чтобы разрешить создание объектов, мы должны предоставить обработчик [<span style="font-family: Consolas, sans-serif;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new). Это эквивалент Python-метода [<span style="font-family: Consolas, sans-serif;">\_\_new\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__new__), но требует явного указания. В данном случае мы можем просто использовать стандартную реализацию, предоставляемую API-функцией [<span style="font-family: Consolas, sans-serif;">PyType_GenericNew()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_GenericNew).
+
+```c
+.tp_new = PyType_GenericNew,
+```
+
+Всё остальное в файле должно быть вам знакомо, за исключением некоторого кода в <span style="font-family: Consolas, sans-serif;">PyInit_custom()</span>:
+
+```c
+if (PyType_Ready(&CustomType) < 0)
+    return;
+```
+
+Он инициализирует тип <span style="font-family: Consolas, sans-serif;">Custom</span>, заполняя ряд полей значениями по умолчанию, включая поле [<span style="font-family: Consolas, sans-serif;">ob_type</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyObject.ob_type), которое мы изначально установили в `NULL`.
+
+```c
+if (PyModule_AddObjectRef(m, "Custom", (PyObject *) &CustomType) < 0) {
+    Py_DECREF(m);
+    return NULL;
+}
+```
+
+Это добавит тип в словарь модуля. Теперь мы можем создавать экземпляры <span style="font-family: Consolas, sans-serif;">Custom</span>, вызывая класс <span style="font-family: Consolas, sans-serif;">Custom</span>:
+
+```python
+import custom
+mycustom = custom.Custom()
+```
+
+Вот и всё! Осталось только собрать модуль; поместите приведённый выше код в файл с именем `custom.c`,
+
+```toml
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "custom"
+version = "1"
+```
+
+добавьте код выше в файл `pyproject.toml`
+
+```py
+from setuptools import Extension, setup
+setup(ext_modules=[Extension("custom", ["custom.c"])])
+```
+
+и поместите предыдущий код в файл `setup.py`
+
+```sh
+python -m pip install .
+```
+
+введите команду выше в командной строке — это создаст файл `custom.so` в подкаталоге и установит его. Теперь запустите Python — вы сможете импортировать модуль `custom` и экспериментировать с объектами `Custom`.
+
+Это было легко, не так ли?
+
+Разумеется, текущая реализация типа `Custom` пока довольно бесполезна. Она не содержит данных и ничего не делает. Более того, её даже нельзя наследовать.
 
 ## 2.2. Добавление данных и методов к базовому примеру
-Текст для подраздела 1.1.
+Давайте расширим базовый пример, добавив данные и методы. Также сделаем тип пригодным для использования в качестве базового класса. Мы создадим новый модуль <span style="font-family: Consolas, sans-serif;">custom2</span> с этими возможностями:
+
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <stddef.h> /* for offsetof() */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *first; /* имя */
+    PyObject *last;  /* фамилия */
+    int number;
+} CustomObject;
+
+static void
+Custom_dealloc(CustomObject *self)
+{
+    Py_XDECREF(self->first);
+    Py_XDECREF(self->last);
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+
+static PyObject *
+Custom_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    CustomObject *self;
+    self = (CustomObject *) type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->first = PyUnicode_FromString("");
+        if (self->first == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->last = PyUnicode_FromString("");
+        if (self->last == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->number = 0;
+    }
+    return (PyObject *) self;
+}
+
+static int
+Custom_init(CustomObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"first", "last", "number", NULL};
+    PyObject *first = NULL, *last = NULL;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|OOi", kwlist,
+                                     &first, &last,
+                                     &self->number))
+        return -1;
+
+    if (first) {
+        Py_XSETREF(self->first, Py_NewRef(first));
+    }
+    if (last) {
+        Py_XSETREF(self->last, Py_NewRef(last));
+    }
+    return 0;
+}
+
+static PyMemberDef Custom_members[] = {
+    {"first", Py_T_OBJECT_EX, offsetof(CustomObject, first), 0,
+     "first name"},
+    {"last", Py_T_OBJECT_EX, offsetof(CustomObject, last), 0,
+     "last name"},
+    {"number", Py_T_INT, offsetof(CustomObject, number), 0,
+     "custom number"},
+    {NULL}  /* Sentinel */
+};
+
+static PyObject *
+Custom_name(CustomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->first == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "first");
+        return NULL;
+    }
+    if (self->last == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "last");
+        return NULL;
+    }
+    return PyUnicode_FromFormat("%S %S", self->first, self->last);
+}
+
+static PyMethodDef Custom_methods[] = {
+    {"name", (PyCFunction) Custom_name, METH_NOARGS,
+     "Return the name, combining the first and last name"
+    },
+    {NULL}  /* Sentinel */
+};
+
+static PyTypeObject CustomType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "custom2.Custom",
+    .tp_doc = PyDoc_STR("Custom objects"),
+    .tp_basicsize = sizeof(CustomObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_new = Custom_new,
+    .tp_init = (initproc) Custom_init,
+    .tp_dealloc = (destructor) Custom_dealloc,
+    .tp_members = Custom_members,
+    .tp_methods = Custom_methods,
+};
+
+static PyModuleDef custommodule = {
+    .m_base =PyModuleDef_HEAD_INIT,
+    .m_name = "custom2",
+    .m_doc = "Example module that creates an extension type.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit_custom2(void)
+{
+    PyObject *m;
+    if (PyType_Ready(&CustomType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&custommodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "Custom", (PyObject *) &CustomType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Эта версия модуля содержит ряд изменений.
+
+Теперь тип <span style="font-family: Consolas, sans-serif;">Сustom</span> содержит три атрибута данных в своей C-структуре: *first*, *last* и *number*. Переменные *first* и las*t являются строками Python (содержащими имя и фамилию соответственно). Атрибут *number* представляет собой целое число в C.
+
+Структура объекта была обновлена соответствующим образом:
+
+```c
+typedef struct {
+    PyObject_HEAD
+    PyObject *first; /* имя */
+    PyObject *last;  /* фамилия */
+    int number;
+} CustomObject;
+```
+
+Поскольку теперь мы работаем с данными, нам нужно более внимательно относиться к выделению и освобождению памяти для объектов. Как минимум, нам потребуется метод для освобождения памяти:
+
+```c
+static void
+Custom_dealloc(CustomObject *self)
+{
+    Py_XDECREF(self->first);
+    Py_XDECREF(self->last);
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+```
+
+который присваивается члену [<span style="font-family: Consolas, sans-serif;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc):
+
+```c
+.tp_dealloc = (destructor) Custom_dealloc,
+```
+
+Этот метод сначала обнуляет счётчики ссылок двух Python-атрибутов. [<span style="font-family: Consolas, sans-serif;">Py_XDECREF()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_XDECREF) корректно обрабатывает случай, когда аргумент равен `NULL` (что может произойти, если `tp_new` завершился с ошибкой). Затем вызывается член [<span style="font-family: Consolas, sans-serif;">tp_free</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_free) типа объекта (получаемый через `Py_TYPE(self)`) для освобождения памяти. Обратите внимание, что тип объекта может отличаться от <span style="font-family: Consolas, sans-serif;">CustomType</span>, так как объект может быть экземпляром подкласса.
+
+> **Примечание**: Явное приведение к типу `destructor` необходимо, потому что мы определили `Custom_dealloc` как принимающую аргумент `CustomObject *`, тогда как указатель на функцию `tp_dealloc` ожидает `PyObject *`. Без этого приведения компилятор выдаст предупреждение. И это - полиморфизм в объектно-ориентированном стиле, реализованный на C!
+
+Чтобы гарантировать инициализацию имени и фамилии пустыми строками, мы реализуем `tp_new`:
+
+```c
+static PyObject *
+Custom_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    CustomObject *self;
+    self = (CustomObject *) type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->first = PyUnicode_FromString("");
+        if (self->first == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->last = PyUnicode_FromString("");
+        if (self->last == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->number = 0;
+    }
+    return (PyObject *) self;
+}
+```
+
+и присвоим его члену [<span style="font-family: Consolas, sans-serif;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new):
+
+```c
+.tp_new = Custom_new,
+```
+
+Обработчик `tp_new` отвечает за создание (но не инициализацию) объектов данного типа. В Python он доступен как метод [<span style="font-family: Consolas, sans-serif;">\_\_new\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__new__). Определение члена `tp_new` не является обязательным - многие типы расширений просто используют [<span style="font-family: Consolas, sans-serif;">PyType_GenericNew()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_GenericNew), как в первой версии типа <span style="font-family: Consolas, sans-serif;">Custom</span> выше. В нашем случае мы используем обработчик `tp_new` для установки атрибутов `first` и `last` в не-`NULL` значения по умолчанию.
+
+`tp_new` получает тип создаваемого экземпляра (не обязательно `CustomType`, если создаётся подкласс) и аргументы, переданные при вызове типа. Ожидается, что он вернёт созданный экземпляр. Обработчики `tp_new` всегда принимают позиционные и именованные аргументы, но часто их игнорируют, оставляя обработку аргументов методам инициализации (известным как `tp_init` в C или `__init__ `в Python).
+
+> **Примечание**: `tp_new` не должен явно вызывать `tp_init`, так как интерпретатор сделает это автоматически.
+
+Реализация `tp_new` вызывает слот [<span style="font-family: Consolas, sans-serif;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc) для выделения памяти:
+
+```c
+self = (CustomObject *) type->tp_alloc(type, 0);
+```
+
+Учитывая возможность неудачного выделения памяти, необходимо выполнить проверку результата [<span style="font-family: Consolas, sans-serif;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc) на значение `NULL` перед выполнением последующих операций.
+
+> **Примечание**: Мы не заполняли слот [<span style="font-family: Consolas, sans-serif;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc) вручную. Вместо этого [<span style="font-family: Consolas, sans-serif;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready) автоматически заполнил его для нас, наследуя от нашего базового класса (по умолчанию - [<span style="font-family: Consolas, sans-serif;">object</span>](https://docs.python.org/3/library/functions.html#object)). Большинство типов используют стратегию выделения памяти по умолчанию.
+
+> **Примечание**: При создании кооперативного [<span style="font-family: Consolas, sans-serif;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new) (который вызывает [<span style="font-family: Consolas, sans-serif;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new) или [<span style="font-family: Consolas, sans-serif;">\_\_new\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__new__) базового типа), нельзя определять вызываемый метод во время выполнения через порядок разрешения методов (MRO). Всегда явно указывайте тип, чей [<span style="font-family: Consolas, sans-serif;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new) следует вызвать, и вызывайте его напрямую или через `type->tp_base->tp_new`. В противном случае Python-подклассы вашего типа, которые также наследуют от других Python-классов, могут работать некорректно (в частности, могут возникать [<span style="font-family: Consolas, sans-serif;">TypeError</span>](https://docs.python.org/3/library/exceptions.html#TypeError) при создании экземпляров таких подклассов).
+
+Определим функцию инициализации, которая принимает аргументы для установки начальных значений нашего экземпляра:
+
+```c
+static int
+Custom_init(CustomObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"first", "last", "number", NULL};
+    PyObject *first = NULL, *last = NULL, *tmp;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|OOi", kwlist,
+                                     &first, &last,
+                                     &self->number))
+        return -1;
+
+    if (first) {
+        tmp = self->first;
+        Py_INCREF(first);
+        self->first = first;
+        Py_XDECREF(tmp);
+    }
+    if (last) {
+        tmp = self->last;
+        Py_INCREF(last);
+        self->last = last;
+        Py_XDECREF(tmp);
+    }
+    return 0;
+}
+```
+
+заполнив [<span style="font-family: Consolas, sans-serif;">tp_init</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_init) слот.
+
+```c
+.tp_init = (initproc) Custom_init,
+```
+
+Слот [<span style="font-family: Consolas, sans-serif;">tp_init</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_init) доступен в Python как метод [<span style="font-family: Consolas, sans-serif;">\_\_init\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__init__). Он используется для инициализации объекта после его создания. Инициализаторы всегда принимают позиционные и именованные аргументы и должны возвращать `0` при успехе или `-1` при ошибке.
+
+В отличие от обработчика `tp_new`, нет гарантии, что `tp_init` вообще будет вызван (например, модуль [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">pickle</span>](https://docs.python.org/3/library/pickle.html#module-pickle) по умолчанию не вызывает [<span style="font-family: Consolas, sans-serif; ">\_\_init\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__init__) для десериализованных экземпляров). Более того, он может вызываться многократно. Любой код может вызвать метод <span style="font-family: Consolas, sans-serif;">\_\_init\_\_()</span> для наших объектов. Поэтому при присвоении новых значений атрибутам нужно быть особенно внимательными. Например, можно было бы попытаться присвоить значение `first` следующим образом:
+
+```c
+if (first) {
+    Py_XDECREF(self->first);
+    Py_INCREF(first);
+    self->first = first;
+}
+```
+
+Но это было бы рискованно. Наш тип не ограничивает тип атрибута `first`, поэтому им может быть любой объект. У этого объекта может быть деструктор, который выполняет код, пытающийся обратиться к атрибуту `first`. Или же этот деструктор может освободить [<u>Global Interpreter Lock</u>](https://docs.python.org/3/glossary.html#term-GIL) (GIL), позволив произвольному коду в других потоках обращаться к нашему объекту и изменять его.
+
+<a id="footnote-5-back"></a><a id="footnote-6-back"></a>Для полной защиты от подобных ситуаций мы почти всегда должны сначала перезаписывать члены объекта, а уже затем уменьшать их счётчики ссылок. В каких случаях это не требуется?
+- Когда мы точно знаем, что счётчик ссылок больше 1;
+- Когда мы уверены, что освобождение объекта [<u>[5]</u>](#footnote-5) не приведёт к освобождению [<u>GIL</u>](https://docs.python.org/3/glossary.html#term-GIL) и не вызовет обратных вызовов в код нашего типа;
+- При уменьшении счётчика ссылок в обработчике [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc) для типа, который не поддерживает циклический сборщик мусора [<u>[6]</u>](#footnote-6).
+
+Мы хотим предоставить доступ к переменным экземпляра как к атрибутам. Существует несколько способов реализации этого. Наиболее простой подход - определение дескрипторов членов (member definitions):
+
+```c
+static PyMemberDef Custom_members[] = {
+    {"first", Py_T_OBJECT_EX, offsetof(CustomObject, first), 0,
+     "first name"},
+    {"last", Py_T_OBJECT_EX, offsetof(CustomObject, last), 0,
+     "last name"},
+    {"number", Py_T_INT, offsetof(CustomObject, number), 0,
+     "custom number"},
+    {NULL}  /* Sentinel */
+};
+```
+
+и поместим определения в слот [<u>tp_members</u>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_members):
+
+```c
+.tp_members = Custom_members,
+```
+
+Каждое определение члена (member) включает имя члена, тип данных, смещение (offset), флаги доступа и cтроку документации. Подробности см. в разделе [<u>Управление атрибутами общего типа</u>](#331-управление-атрибутами-общего-типа) ниже.
+
+Недостаток этого подхода в том, что он не позволяет ограничить типы объектов, которые могут быть присвоены Python-атрибутам. Мы ожидаем, что first и last будут строками, но можно присвоить любые Python-объекты. Более того, атрибуты можно удалять, что приведёт к установке C-указателей в `NULL`. Хотя мы можем гарантировать инициализацию членов не-`NULL` значениями, они могут стать `NULL` при удалении атрибутов.
+
+Определим метод <span style="font-family: Consolas, sans-serif;">Custom.name()</span>, который возвращает имя объекта в виде объединения (конкатенации) имени и фамилии.
+
+```c
+static PyObject *
+Custom_name(CustomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->first == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "first");
+        return NULL;
+    }
+    if (self->last == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "last");
+        return NULL;
+    }
+    return PyUnicode_FromFormat("%S %S", self->first, self->last);
+}
+```
+
+Метод реализован в виде C-функции, которая принимает экземпляр класса <span style="font-family: Consolas, sans-serif;">Custom</span> (или его подкласса) в качестве первого аргумента. Методы всегда принимают экземпляр первым аргументом. Часто методы также принимают позиционные и именованные аргументы, но в данном случае они не требуются, поэтому нет необходимости обрабатывать кортеж позиционных аргументов или словарь именованных аргументов. Этот метод эквивалентен следующему Python-методу:
+
+```python
+def name(self):
+    return "%s %s" % (self.first, self.last)
+```
+
+Обратите внимание, что нам необходимо проверить, что <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> равны `NULL`. Это необходимо, поскольку их могут удалить, и в таком случае они примут значение `NULL`. Оптимальным решением было бы запретить удаление этих полей и ограничить допустимые значения только строками. Как это реализовать, мы рассмотрим в следующем разделе.
+
+Теперь, когда мы определили метод, нам нужно создать массив определений методов
+
+```c
+static PyMethodDef Custom_methods[] = {
+    {"name", (PyCFunction) Custom_name, METH_NOARGS,
+     "Return the name, combining the first and last name"
+    },
+    {NULL}  /* Sentinel */
+};
+```
+
+(обратите внимание, что мы использовали флаг [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">METH_NOARGS</span>](https://docs.python.org/3/c-api/structures.html#c.METH_NOARGS), чтобы указать, что метод не принимает никаких аргументов, кроме *self*)
+
+и присвоим его слоту [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">tp_methods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_methods):
+
+```c
+.tp_methods = Custom_methods,
+```
+
+Наконец, сделаем наш тип пригодным для наследования. До этого момента мы аккуратно писали наши методы, чтобы они не делали никаких предположений о типе создаваемого или используемого объекта. Поэтому всё, что нам остаётся сделать — это добавить флаг [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">Py_TPFLAGS_BASETYPE</span>](https://docs.python.org/3/c-api/typeobj.html#c.Py_TPFLAGS_BASETYPE) в определение флагов нашего класса:
+
+```c
+.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+```
+
+Мы переименовываем <span style="font-family: Consolas, sans-serif">PyInit_custom()</span> в <span style="font-family: Consolas, sans-serif">PyInit_custom2()</span>, обновляем название модуля в структуре [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">PyModuleDef</span>](https://docs.python.org/3/c-api/module.html#c.PyModuleDef) и полное имя класса в структуре [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">PyTypeObject</span>](https://docs.python.org/3/c-api/type.html#c.PyTypeObject).
+
+Теперь обновим наш файл `setup.py`, чтобы включить в него новый модуль,
+
+```c
+from setuptools import Extension, setup
+setup(ext_modules=[
+    Extension("custom", ["custom.c"]),
+    Extension("custom2", ["custom2.c"]),
+])
+```
+
+затем переустановим пакет, чтобы получить возможность импортировать модуль `custom2`:
+
+```sh
+python -m pip install .
+```
 
 ## 2.3. Более точный контроль над атрибутами данных
-Текст для подраздела 1.1.
+В этом разделе мы реализуем более точный контроль над установкой атрибутов <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> в классе Custom. В предыдущей версии нашего модуля переменные экземпляра <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> могли принимать значения не строкового типа или даже быть удалёнными. Нам необходимо гарантировать, что эти атрибуты всегда содержат строковые значения.
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <stddef.h> /* for offsetof() */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *first; /* имя */
+    PyObject *last;  /* фамилия */
+    int number;
+} CustomObject;
+
+static void
+Custom_dealloc(CustomObject *self)
+{
+    Py_XDECREF(self->first);
+    Py_XDECREF(self->last);
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+
+static PyObject *
+Custom_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    CustomObject *self;
+    self = (CustomObject *) type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->first = PyUnicode_FromString("");
+        if (self->first == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->last = PyUnicode_FromString("");
+        if (self->last == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->number = 0;
+    }
+    return (PyObject *) self;
+}
+
+static int
+Custom_init(CustomObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"first", "last", "number", NULL};
+    PyObject *first = NULL, *last = NULL;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|UUi", kwlist,
+                                     &first, &last,
+                                     &self->number))
+        return -1;
+
+    if (first) {
+        Py_SETREF(self->first, Py_NewRef(first));
+    }
+    if (last) {
+        Py_SETREF(self->last, Py_NewRef(last));
+    }
+    return 0;
+}
+
+static PyMemberDef Custom_members[] = {
+    {"number", Py_T_INT, offsetof(CustomObject, number), 0,
+     "custom number"},
+    {NULL}  /* Sentinel */
+};
+
+static PyObject *
+Custom_getfirst(CustomObject *self, void *closure)
+{
+    return Py_NewRef(self->first);
+}
+
+static int
+Custom_setfirst(CustomObject *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Cannot delete the first attribute");
+        return -1;
+    }
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The first attribute value must be a string");
+        return -1;
+    }
+    Py_SETREF(self->first, Py_NewRef(value));
+    return 0;
+}
+
+static PyObject *
+Custom_getlast(CustomObject *self, void *closure)
+{
+    return Py_NewRef(self->last);
+}
+
+static int
+Custom_setlast(CustomObject *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Cannot delete the last attribute");
+        return -1;
+    }
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The last attribute value must be a string");
+        return -1;
+    }
+    Py_SETREF(self->last, Py_NewRef(value));
+    return 0;
+}
+
+static PyGetSetDef Custom_getsetters[] = {
+    {"first", (getter) Custom_getfirst, (setter) Custom_setfirst,
+     "first name", NULL},
+    {"last", (getter) Custom_getlast, (setter) Custom_setlast,
+     "last name", NULL},
+    {NULL}  /* Sentinel */
+};
+
+static PyObject *
+Custom_name(CustomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyUnicode_FromFormat("%S %S", self->first, self->last);
+}
+
+static PyMethodDef Custom_methods[] = {
+    {"name", (PyCFunction) Custom_name, METH_NOARGS,
+     "Return the name, combining the first and last name"
+    },
+    {NULL}  /* Sentinel */
+};
+
+static PyTypeObject CustomType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "custom3.Custom",
+    .tp_doc = PyDoc_STR("Custom objects"),
+    .tp_basicsize = sizeof(CustomObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_new = Custom_new,
+    .tp_init = (initproc) Custom_init,
+    .tp_dealloc = (destructor) Custom_dealloc,
+    .tp_members = Custom_members,
+    .tp_methods = Custom_methods,
+    .tp_getset = Custom_getsetters,
+};
+
+static PyModuleDef custommodule = {
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "custom3",
+    .m_doc = "Example module that creates an extension type.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit_custom3(void)
+{
+    PyObject *m;
+    if (PyType_Ready(&CustomType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&custommodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "Custom", (PyObject *) &CustomType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Для обеспечения более строгого контроля над атрибутами <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> мы реализуем специальные функции - геттеры и сеттеры. Ниже представлены функции для работы с атрибутом <span style="font-family: Consolas, sans-serif;">first</span>:
+
+```c
+static PyObject *
+Custom_getfirst(CustomObject *self, void *closure)
+{
+    Py_INCREF(self->first);
+    return self->first;
+}
+
+static int
+Custom_setfirst(CustomObject *self, PyObject *value, void *closure)
+{
+    PyObject *tmp;
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Cannot delete the first attribute");
+        return -1;
+    }
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The first attribute value must be a string");
+        return -1;
+    }
+    tmp = self->first;
+    Py_INCREF(value);
+    self->first = value;
+    Py_DECREF(tmp);
+    return 0;
+}
+```
+
+Функция-геттер принимает два параметра: объект типа <span style="font-family: Consolas, sans-serif;">Custom</span> и "closure" (замыкание) в виде указателя типа void. В нашем случае параметр closure не используется. (Пояснение: closure поддерживает сложные сценарии использования, когда данные определения передаются в геттер и сеттер. Например, это позволяет создать единый набор функций-геттеров и сеттеров, которые определяют, какой атрибут нужно получить или изменить, на основе данных из closure.)
+
+Функция-сеттер принимает объект типа <span style="font-family: Consolas, sans-serif;">Custom</span>, новое значение (может быть `NULL`) и closure (указатель типа void, как в геттере). Если передано значение NULL, это означает запрос на удаление атрибута. В нашей реализации при попытке удаления атрибута или попытке установить значение не строкового типа вызывается ошибка.
+
+Создадим массив структур [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">PyGetSetDef</span>](https://docs.python.org/3/c-api/structures.html#c.PyGetSetDef):
+
+```c
+static PyGetSetDef Custom_getsetters[] = {
+    {"first", (getter) Custom_getfirst, (setter) Custom_setfirst,
+     "first name", NULL},
+    {"last", (getter) Custom_getlast, (setter) Custom_setlast,
+     "last name", NULL},
+    {NULL}  /* Sentinel */
+};
+```
+и присвоим его слоту [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">tp_getset</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_getset):
+
+```c
+.tp_getset = Custom_getsetters,
+```
+
+Последним элементом структуры [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">PyGetSetDef</span>](https://docs.python.org/3/c-api/structures.html#c.PyGetSetDef) является упомянутый выше closure. В нашем случае мы не используем closure, поэтому просто передаём `NULL`.
+
+Теперь удалим определения этих атрибутов как членов структуры:
+
+```c
+static PyMemberDef Custom_members[] = {
+    {"number", Py_T_INT, offsetof(CustomObject, number), 0,
+     "custom number"},
+    {NULL}  /* Sentinel */
+};
+```
+
+<a id="footnote-7-back"></a>Также нам необходимо обновить обработчик [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">tp_init</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_init), чтобы он разрешал передачу только строковых значений [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">[7]</span>](#footnote-7):
+
+```c
+static int
+Custom_init(CustomObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"first", "last", "number", NULL};
+    PyObject *first = NULL, *last = NULL, *tmp;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|UUi", kwlist,
+                                     &first, &last,
+                                     &self->number))
+        return -1;
+
+    if (first) {
+        tmp = self->first;
+        Py_INCREF(first);
+        self->first = first;
+        Py_DECREF(tmp);
+    }
+    if (last) {
+        tmp = self->last;
+        Py_INCREF(last);
+        self->last = last;
+        Py_DECREF(tmp);
+    }
+    return 0;
+}
+```
+
+С внесёнными изменениями мы можем гарантировать, что члены `first` и `last` никогда не будут `NULL`, поэтому почти во всех случаях можно удалить проверки на `NULL`. Это означает, что большинство вызовов [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">Py_XDECREF()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_XDECREF) можно заменить на [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">Py_DECREF()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_DECREF). Единственное место, где мы не можем изменить эти вызовы — реализация `tp_dealloc`, поскольку существует вероятность, что инициализация этих членов завершилась неудачно в `tp_new`.
+
+Также мы переименовываем функцию инициализации модуля и его название в соответствующей функции (как мы делали ранее), а также добавляем новое определение в файл `setup.py`.
 
 ## 2.4. Поддержка циклического сборщика мусора
-Текст для подраздела 1.1.
+В Python используется циклический сборщик мусора [(<u>cyclic garbage collector (GC)</u>)](https://docs.python.org/3/glossary.html#term-garbage-collection), который способен обнаруживать ненужные объекты, даже если их счётчик ссылок не равен нулю. Это происходит, когда объекты образуют циклические ссылки. Например: 
+
+```python
+l = []
+l.append(l)
+del l
+```
+
+В этом примере мы создаём список, который содержит сам себя. Когда мы удаляем его, он всё ещё имеет ссылку на самого себя, поэтому его счётчик ссылок не обнуляется. Однако циклический сборщик мусора (GC) Python в итоге определит, что этот список больше не нужен, и освободит занимаемую списком память.
+
+<a id="footnote-8-back"></a>Во второй версии примера с классом <span style="font-family: Consolas, sans-serif;">Custom</span> мы разрешали хранить объекты любого типа в атрибутах <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">[8]</span>](#footnote-8). Кроме того, во второй и третьей версиях мы разрешили наследование от <span style="font-family: Consolas, sans-serif;">Custom</span>, и подклассы могут добавлять произвольные атрибуты. По любой из этих двух причин объекты <span style="font-family: Consolas, sans-serif;">Custom</span> могут участвовать в циклах:
+
+```python
+import custom3
+class Derived(custom3.Custom): pass
+
+n = Derived()
+n.some_attribute = n
+```
+Чтобы объекты типа <span style="font-family: Consolas, sans-serif;">Custom</span>, участвующие в циклических ссылках, могли быть корректно обнаружены и обработаны циклическим сборщиком мусора (GC), необходимо заполнить два дополнительных слота в структуре типа и установить флаг, который активирует эти слоты:
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#include <stddef.h> /* for offsetof() */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *first; /* first name */
+    PyObject *last;  /* last name */
+    int number;
+} CustomObject;
+
+static int
+Custom_traverse(CustomObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->first);
+    Py_VISIT(self->last);
+    return 0;
+}
+
+static int
+Custom_clear(CustomObject *self)
+{
+    Py_CLEAR(self->first);
+    Py_CLEAR(self->last);
+    return 0;
+}
+
+static void
+Custom_dealloc(CustomObject *self)
+{
+    PyObject_GC_UnTrack(self);
+    Custom_clear(self);
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+
+static PyObject *
+Custom_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    CustomObject *self;
+    self = (CustomObject *) type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->first = PyUnicode_FromString("");
+        if (self->first == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->last = PyUnicode_FromString("");
+        if (self->last == NULL) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        self->number = 0;
+    }
+    return (PyObject *) self;
+}
+
+static int
+Custom_init(CustomObject *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {"first", "last", "number", NULL};
+    PyObject *first = NULL, *last = NULL;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|UUi", kwlist,
+                                     &first, &last,
+                                     &self->number))
+        return -1;
+
+    if (first) {
+        Py_SETREF(self->first, Py_NewRef(first));
+    }
+    if (last) {
+        Py_SETREF(self->last, Py_NewRef(last));
+    }
+    return 0;
+}
+
+static PyMemberDef Custom_members[] = {
+    {"number", Py_T_INT, offsetof(CustomObject, number), 0,
+     "custom number"},
+    {NULL}  /* Sentinel */
+};
+
+static PyObject *
+Custom_getfirst(CustomObject *self, void *closure)
+{
+    return Py_NewRef(self->first);
+}
+
+static int
+Custom_setfirst(CustomObject *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Cannot delete the first attribute");
+        return -1;
+    }
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The first attribute value must be a string");
+        return -1;
+    }
+    Py_XSETREF(self->first, Py_NewRef(value));
+    return 0;
+}
+
+static PyObject *
+Custom_getlast(CustomObject *self, void *closure)
+{
+    return Py_NewRef(self->last);
+}
+
+static int
+Custom_setlast(CustomObject *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Cannot delete the last attribute");
+        return -1;
+    }
+    if (!PyUnicode_Check(value)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "The last attribute value must be a string");
+        return -1;
+    }
+    Py_XSETREF(self->last, Py_NewRef(value));
+    return 0;
+}
+
+static PyGetSetDef Custom_getsetters[] = {
+    {"first", (getter) Custom_getfirst, (setter) Custom_setfirst,
+     "first name", NULL},
+    {"last", (getter) Custom_getlast, (setter) Custom_setlast,
+     "last name", NULL},
+    {NULL}  /* Sentinel */
+};
+
+static PyObject *
+Custom_name(CustomObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return PyUnicode_FromFormat("%S %S", self->first, self->last);
+}
+
+static PyMethodDef Custom_methods[] = {
+    {"name", (PyCFunction) Custom_name, METH_NOARGS,
+     "Return the name, combining the first and last name"
+    },
+    {NULL}  /* Sentinel */
+};
+
+static PyTypeObject CustomType = {
+    .ob_base = PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "custom4.Custom",
+    .tp_doc = PyDoc_STR("Custom objects"),
+    .tp_basicsize = sizeof(CustomObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+    .tp_new = Custom_new,
+    .tp_init = (initproc) Custom_init,
+    .tp_dealloc = (destructor) Custom_dealloc,
+    .tp_traverse = (traverseproc) Custom_traverse,
+    .tp_clear = (inquiry) Custom_clear,
+    .tp_members = Custom_members,
+    .tp_methods = Custom_methods,
+    .tp_getset = Custom_getsetters,
+};
+
+static PyModuleDef custommodule = {
+    .m_base = PyModuleDef_HEAD_INIT,
+    .m_name = "custom4",
+    .m_doc = "Example module that creates an extension type.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit_custom4(void)
+{
+    PyObject *m;
+    if (PyType_Ready(&CustomType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&custommodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "Custom", (PyObject *) &CustomType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Во-первых, функция обхода сообщает циклическому сборщику мусора (GC) о внутренних объектах, которые могут участвовать в циклах:
+
+```c
+static int
+Custom_traverse(CustomObject *self, visitproc visit, void *arg)
+{
+    int vret;
+    if (self->first) {
+        vret = visit(self->first, arg);
+        if (vret != 0)
+            return vret;
+    }
+    if (self->last) {
+        vret = visit(self->last, arg);
+        if (vret != 0)
+            return vret;
+    }
+    return 0;
+}
+```
+
+Для каждого подобъекта, который может участвовать в циклах, мы должны вызвать функцию <span style="font-family: Consolas, sans-serif;">visit()</span>, передаваемую в метод обхода. Функция <span style="font-family: Consolas, sans-serif;">visit()</span> принимает в качестве аргументов подобъект и дополнительный аргумент *arg*, переданный в метод обхода. Она возвращает целочисленное значение, которое должно быть возвращено, если оно не равно нулю.
+
+В Python предусмотрен макрос [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_VISIT()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.Py_VISIT), который автоматизирует вызов функций обхода. Использование [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_VISIT()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.Py_VISIT) позволяет сократить шаблонный код в `Custom_traverse`:
+
+```c
+static int
+Custom_traverse(CustomObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->first);
+    Py_VISIT(self->last);
+    return 0;
+}
+```
+
+> **Примечание**: Реализация [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_traverse</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_traverse) должна использовать точные имена аргументов *visit* и *arg* для корректной работы [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_VISIT()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.Py_VISIT).
+
+Во-вторых, необходимо реализовать метод для очистки подобъектов, которые могут участвовать в циклах:
+
+```c
+static int
+Custom_clear(CustomObject *self)
+{
+    Py_CLEAR(self->first);
+    Py_CLEAR(self->last);
+    return 0;
+}
+```
+
+Обратите внимание на использование макроса [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_CLEAR()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_CLEAR). Это рекомендуемый и безопасный способ очистки атрибутов данных произвольных типов с одновременным уменьшением их счётчиков ссылок. Если вместо этого вызвать [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_XDECREF()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_XDECREF) для атрибута перед установкой значения `NULL`, существует вероятность, что деструктор атрибута вызовет код, который снова прочитает этот атрибут (особенно при наличии циклических ссылок)
+
+> **Примечание**: Вы можете воспроизвести поведение [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_CLEAR()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_CLEAR), написав:
+> ```c
+> PyObject *tmp;
+> tmp = self->first;
+>self->first = NULL;
+>Py_XDECREF(tmp);
+>```
+> Тем не менее, всегда используйте [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_CLEAR()</span>](https://docs.python.org/3/c-api/refcounting.html#c.Py_CLEAR) при удалении атрибутов — это проще и снижает риск ошибок. Не жертвуйте надёжностью ради микро-оптимизаций!
+
+Деструктор `Custom_dealloc` может выполнять произвольный код при очистке атрибутов, что потенциально способно запустить циклический сборщик мусора (GC) внутри этой функции. Поскольку GC предполагает, что счётчик ссылок объекта не равен нулю, необходимо исключить объект из отслеживания GC с помощью вызова [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_GC_UnTrack()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.PyObject_GC_UnTrack) до очистки его членов. Вот переработанная реализация деструктора с использованием [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_GC_UnTrack()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.PyObject_GC_UnTrack) и `Custom_clear`:
+
+```c
+static void
+Custom_dealloc(CustomObject *self)
+{
+    PyObject_GC_UnTrack(self);
+    Custom_clear(self);
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+```
+
+Наконец, добавим флаг [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_TPFLAGS_HAVE_GC</span>](https://docs.python.org/3/c-api/typeobj.html#c.Py_TPFLAGS_HAVE_GC) к флагам класса
+
+```c
+.tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+```
+
+Вот и всё. Если бы мы реализовали собственные обработчики [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc) или [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_free</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_free), их потребовалось бы доработать для поддержки циклического сборщика мусора. Однако большинство расширений используют версии этих методов, предоставляемые Python по умолчанию.
 
 ## 2.5. Наследование от других типов
-Текст для подраздела 1.1.
+Можно создавать новые типы расширений, унаследованные от существующих типов. Проще всего наследовать встроенные типы, так как расширение может легко использовать необходимую структуру [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyTypeObject</span>](https://docs.python.org/3/c-api/type.html#c.PyTypeObject). Однако совместное использование этих структур  [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyTypeObject</span>](https://docs.python.org/3/c-api/type.html#c.PyTypeObject) между модулями расширений может быть затруднено.
+
+В этом примере мы создадим тип <span style="font-family: Consolas, sans-serif;">SubList</span>, унаследованный от встроенного типа [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">list</span>](https://docs.python.org/3/library/stdtypes.html#list). Новый тип будет полностью совместим с обычными списками, но получит дополнительный метод <span style="font-family: Consolas, sans-serif;">increment()</span>, увеличивающий внутренний счётчик:
+
+```python
+import sublist
+s = sublist.SubList(range(3))
+s.extend(s)
+print(len(s))
+
+print(s.increment())
+
+print(s.increment())
+```
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+typedef struct {
+    PyListObject list;
+    int state;
+} SubListObject;
+
+static PyObject *
+SubList_increment(SubListObject *self, PyObject *unused)
+{
+    self->state++;
+    return PyLong_FromLong(self->state);
+}
+
+static PyMethodDef SubList_methods[] = {
+    {"increment", (PyCFunction) SubList_increment, METH_NOARGS,
+     PyDoc_STR("increment state counter")},
+    {NULL},
+};
+
+static int
+SubList_init(SubListObject *self, PyObject *args, PyObject *kwds)
+{
+    if (PyList_Type.tp_init((PyObject *) self, args, kwds) < 0)
+        return -1;
+    self->state = 0;
+    return 0;
+}
+
+static PyTypeObject SubListType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "sublist.SubList",
+    .tp_doc = PyDoc_STR("SubList objects"),
+    .tp_basicsize = sizeof(SubListObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_init = (initproc) SubList_init,
+    .tp_methods = SubList_methods,
+};
+
+static PyModuleDef sublistmodule = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "sublist",
+    .m_doc = "Example module that creates an extension type.",
+    .m_size = -1,
+};
+
+PyMODINIT_FUNC
+PyInit_sublist(void)
+{
+    PyObject *m;
+    SubListType.tp_base = &PyList_Type;
+    if (PyType_Ready(&SubListType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&sublistmodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "SubList", (PyObject *) &SubListType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Как мы видим, исходный код во многом напоминает примеры с классом <span style="font-family: Consolas, sans-serif;">Custom</span> из предыдущих разделов. Далее мы разберём ключевые отличия между этими реализациями.
+
+```c
+typedef struct {
+    PyListObject list;
+    int state;
+} SubListObject;
+```
+
+Главное отличие для производных типов объектов заключается в том, что структура объекта базового типа должна быть первым элементом. Базовый тип уже включает макрос [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_HEAD()</span>](https://docs.python.org/3/c-api/structures.html#c.PyObject_HEAD) в начале своей структуры.
+
+Когда объект Python является экземпляром <span style="font-family: Consolas, sans-serif;">SubList</span>, указатель `PyObject *` может быть безопасно приведён как к `PyListObject *`, так и к `SubListObject *`:
+
+```c
+static int
+SubList_init(SubListObject *self, PyObject *args, PyObject *kwds)
+{
+    if (PyList_Type.tp_init((PyObject *) self, args, kwds) < 0)
+        return -1;
+    self->state = 0;
+    return 0;
+}
+```
+
+В приведённом примере показано, как вызвать метод [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_init\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__init__) базового типа.
+
+Этот подход особенно важен при создании типа с пользовательскими обработчиками [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new) и [tp_dealloc](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc). Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new) не должен самостоятельно выделять память для объекта через свой [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc), а должен делегировать эту операцию базовому классу, вызывая его версию [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_new</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_new).
+
+Структура [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyTypeObject</span>](https://docs.python.org/3/c-api/type.html#c.PyTypeObject) включает поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_base</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_base) для указания конкретного базового класса. Однако из-за особенностей кросс-платформенной компиляции нельзя напрямую присвоить этому полю ссылку на [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyList_Type</span>](https://docs.python.org/3/c-api/list.html#c.PyList_Type); это следует сделать позже, в функции инициализации модуля:
+
+```c
+PyMODINIT_FUNC
+PyInit_sublist(void)
+{
+    PyObject* m;
+    SubListType.tp_base = &PyList_Type;
+    if (PyType_Ready(&SubListType) < 0)
+        return NULL;
+
+    m = PyModule_Create(&sublistmodule);
+    if (m == NULL)
+        return NULL;
+
+    if (PyModule_AddObjectRef(m, "SubList", (PyObject *) &SubListType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    return m;
+}
+```
+
+Перед вызовом [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready) необходимо заполнить слот [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_base</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_base) в структуре типа. При наследовании существующего типа нет необходимости заполнять слот [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_alloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_alloc) функцией [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_GenericNew()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_GenericNew) — функция аллокации будет унаследована от базового типа.
+
+После этого вызов [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready) и добавление объекта типа в модуль выполняются аналогично базовым примерам с <span style="font-family: Consolas, sans-serif;">Custom</span>.
 
 # 3. Определение типов расширений: различные темы
 Текст для раздела 1.
@@ -935,7 +2211,7 @@ PyInit_client(void)
 Текст для подраздела 1.1.
 
 ## 3.3. Управление атрибутами
-Текст для подраздела 1.1.
+### 3.3.1 Управление атрибутами общего типа
 
 ## 3.4. Сравнение объектов
 Текст для подраздела 1.1.
@@ -992,10 +2268,18 @@ PyInit_client(void)
 
 **Сноски**
 
-<a id="footnote-1"></a>[[1](#footnote-1-back)] Интерфейс для этой функции уже существует в стандартном модуле [os](https://docs.python.org/3/library/os.html#module-os) — он был выбран в качестве простого и наглядного примера.
+<a id="footnote-1"></a>[[<u>1</u>](#footnote-1-back)] Интерфейс для этой функции уже существует в стандартном модуле [os](https://docs.python.org/3/library/os.html#module-os) — он был выбран в качестве простого и наглядного примера.
 
-<a id="footnote-2"></a>[[2](#footnote-2-back)] Метафора «занять» ссылку не совсем точна: у владельца всё ещё остаётся копия ссылки.
+<a id="footnote-2"></a>[[<u>2</u>](#footnote-2-back)] Метафора «занять» ссылку не совсем точна: у владельца всё ещё остаётся копия ссылки.
 
-<a id="footnote-3"></a>[[3](#footnote-3-back)] Проверка, что счётчик ссылок хотя бы равен 1, не работает — сам счётчик ссылок может находиться в освобождённой памяти и, следовательно, быть повторно использован для другого объекта!
+<a id="footnote-3"></a>[[<u>3</u>](#footnote-3-back)] Проверка, что счётчик ссылок хотя бы равен 1, не работает — сам счётчик ссылок может находиться в освобождённой памяти и, следовательно, быть повторно использован для другого объекта!
 
-<a id="footnote-4"></a>[[4](#footnote-4-back)] Эти гарантии не действуют при использовании «старого» стиля вызова функций — который до сих пор встречается во многих существующих кодовых базах.
+<a id="footnote-4"></a>[<u>[4</u>](#footnote-4-back)] Эти гарантии не действуют при использовании «старого» стиля вызова функций — который до сих пор встречается во многих существующих кодовых базах.
+
+<a id="footnote-5"></a>[<u>[5</u>](#footnote-5-back)] Это верно, когда мы знаем, что объект имеет базовый тип, например строку или число с плавающей точкой.
+
+<a id="footnote-6"></a>[[<u>6</u>](#footnote-6-back)] Мы полагались на это в обработчике [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc) в данном примере, поскольку наш тип не поддерживает сборку мусора.
+
+<a id="footnote-7"></a>[[<u>7</u>](#footnote-7-back)] Теперь мы точно знаем, что члены <span style="font-family: Consolas, sans-serif;">first</span> и <span style="font-family: Consolas, sans-serif;">last</span> содержат строки, поэтому теоретически могли бы менее строго подходить к уменьшению их счетчиков ссылок. Однако мы также допускаем использование подклассов строк. Хотя освобождение обычных строк не приведет к обратным вызовам в наш объект, мы не можем гарантировать, что освобождение экземпляра подкласса строки не вызовет методов нашего класса.
+
+<a id="footnote-8"></a>[[<u>8</u>](#footnote-8-back)] Кроме того, даже если мы ограничили атрибуты экземплярами [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">str</span>](https://docs.python.org/3/library/stdtypes.html#str), пользователь может передавать подклассы строк (произвольные наследники [<span style="font-family: Consolas, sans-serif; text-decoration: underline;">str</span>](https://docs.python.org/3/library/stdtypes.html#str)), что всё ещё позволяет создавать циклические ссылки.
