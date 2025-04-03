@@ -42,6 +42,7 @@
   - [3.2. Представление объекта](#32-представление-объекта)
   - [3.3. Управление атрибутами](#33-управление-атрибутами)
     - [3.3.1 Управление атрибутами общего типа](#331-управление-атрибутами-общего-типа)
+    - [3.3.2 Управление атрибутами для конкретного типа](#332-управление-атрибутами-для-конкретного-типа)
   - [3.4. Сравнение объектов](#34-сравнение-объектов)
   - [3.5. Поддержка абстрактных протоколов](#35-поддержка-абстрактных-протоколов)
   - [3.6. Поддержка слабых ссылок](#36-поддержка-слабых-ссылок)
@@ -2202,28 +2203,471 @@ PyInit_sublist(void)
 После этого вызов [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready) и добавление объекта типа в модуль выполняются аналогично базовым примерам с <span style="font-family: Consolas, sans-serif;">Custom</span>.
 
 # 3. Определение типов расширений: различные темы
-Текст для раздела 1.
+Этот раздел призван дать краткий обзор различных методов типов, которые вы можете реализовать, и объяснить их назначение.
+
+Вот определение [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyTypeObject</span>](https://docs.python.org/3/c-api/type.html#c.PyTypeObject), с опущенными некоторыми полями, которые используются только в [<u>debug-сборках</u>](https://docs.python.org/3/using/configure.html#debug-build):
+
+```c
+typedef struct _typeobject {
+    PyObject_VAR_HEAD
+    const char *tp_name; /* Для вывода в формате "<модуль>.<имя>" */
+    Py_ssize_t tp_basicsize, tp_itemsize; /* Для выделения памяти */
+
+    /* Методы для стандартных операций */
+
+    destructor tp_dealloc;
+    Py_ssize_t tp_vectorcall_offset;
+    getattrfunc tp_getattr;
+    setattrfunc tp_setattr;
+    PyAsyncMethods *tp_as_async; /* Ранее известен как tp_compare (Python 2)
+                                    или tp_reserved (Python 3) */
+    reprfunc tp_repr;
+
+    /* Наборы методов для стандартных классов */
+
+    PyNumberMethods *tp_as_number;
+    PySequenceMethods *tp_as_sequence;
+    PyMappingMethods *tp_as_mapping;
+
+    /* Дополнительные стандартные операции (здесь для бинарной совместимости) */
+
+    hashfunc tp_hash;
+    ternaryfunc tp_call;
+    reprfunc tp_str;
+    getattrofunc tp_getattro;
+    setattrofunc tp_setattro;
+
+    /* Функции для доступа к объекту как к буферу ввода/вывода */
+    PyBufferProcs *tp_as_buffer;
+
+    /* Флаги, определяющие наличие дополнительных возможностей */
+    unsigned long tp_flags;
+
+    const char *tp_doc; /* Строка документации */
+
+    /* Новое значение в версии 2.0 */
+    /* Функция обхода для всех доступных объектов */
+    traverseproc tp_traverse;
+
+    /* Удаление ссылок на содержащиеся объекты */
+    inquiry tp_clear;
+
+    /* Новое значение в версии 2.1 */
+    /* "Богатые" сравнения */
+    richcmpfunc tp_richcompare;
+
+    /* Смещение для слабых ссылок */
+    Py_ssize_t tp_weaklistoffset;
+
+    /* Итераторы */
+    getiterfunc tp_iter;
+    iternextfunc tp_iternext;
+
+    /* Дескрипторы атрибутов и механизмы наследования */
+    struct PyMethodDef *tp_methods;
+    struct PyMemberDef *tp_members;
+    struct PyGetSetDef *tp_getset;
+    // Сильная ссылка для типа в куче, заимствованная ссылка для статического типа
+    struct _typeobject *tp_base;
+    PyObject *tp_dict;
+    descrgetfunc tp_descr_get;
+    descrsetfunc tp_descr_set;
+    Py_ssize_t tp_dictoffset;
+    initproc tp_init;
+    allocfunc tp_alloc;
+    newfunc tp_new;
+    freefunc tp_free; /* Низкоуровневая функция освобождения памяти */
+    inquiry tp_is_gc; /* Для PyObject_IS_GC */
+    PyObject *tp_bases;
+    PyObject *tp_mro; /* порядок разрешения методов */
+    PyObject *tp_cache;
+    PyObject *tp_subclasses;
+    PyObject *tp_weaklist;
+    destructor tp_del;
+
+    /* Тег версии кеша атрибутов типа. Добавлено в версии 2.6 */
+    unsigned int tp_version_tag;
+
+    destructor tp_finalize;
+    vectorcallfunc tp_vectorcall;
+
+    /* Битовая маска наблюдателей за типом */
+    unsigned char tp_watched;
+} PyTypeObject;
+```
+
+Получилось довольно много методов. Но не переживайте — если вам нужно определить тип, скорее всего, вам понадобится реализовать лишь небольшую часть из них.
+
+Как вы, вероятно, уже догадались, мы сейчас разберём это подробнее и предоставим дополнительную информацию о различных обработчиках. Мы не будем придерживаться порядка, в котором они определены в структуре, поскольку на их расположение повлияло множество исторически сложившихся особенностей. Чаще всего проще всего найти пример, содержащий нужные вам поля, а затем изменить их значения под ваш новый тип.
+
+
+```c
+const char *tp_name; /* Для отображения */
+```
+
+Название типа — как упоминалось в предыдущей главе, оно будет появляться в различных местах, почти исключительно в диагностических целях. Постарайтесь выбрать что-то, что будет полезным в таких ситуациях!
+
+```c
+Py_ssize_t tp_basicsize, tp_itemsize; /* Для выделения памяти */
+```
+
+Эти поля указывают среде выполнения, сколько памяти выделять при создании новых объектов данного типа. В Python есть встроенная поддержка структур переменной длины (например, строки, кортежи), для чего и предназначено поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_itemsize</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_itemsize). Мы рассмотрим это подробнее позже.
+
+```c
+const char *tp_doc;
+```
+
+Здесь вы можете указать строку (или её адрес), которая будет возвращаться при обращении к `obj.__doc__` для получения документационной строки.
+
+Теперь перейдём к основным методам типа — тем, которые реализует большинство расширяемых типов.
 
 ## 3.1. Завершение и освобождение памяти
-Текст для подраздела 1.1.
+```
+destructor tp_dealloc;
+```
+
+Эта функция вызывается, когда счётчик ссылок на экземпляр вашего типа достигает нуля и интерпретатор Python хочет его освободить. Если ваш тип требует освобождения памяти или других операций очистки, их следует реализовать здесь. Сам объект также должен быть освобождён в этой функции.Пример такой функции:
+
+```c
+static void
+newdatatype_dealloc(newdatatypeobject *obj)
+{
+    free(obj->obj_UnderlyingDatatypePtr);
+    Py_TYPE(obj)->tp_free((PyObject *)obj);
+}
+```
+
+Если ваш тип поддерживает сборку мусора, деструктор должен вызвать [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_GC_UnTrack()</span>](https://docs.python.org/3/c-api/gcsupport.html#c.PyObject_GC_UnTrack) перед очисткой любых полей объекта:
+
+```c
+static void
+newdatatype_dealloc(newdatatypeobject *obj)
+{
+    PyObject_GC_UnTrack(obj);
+    Py_CLEAR(obj->other_obj);
+    ...
+    Py_TYPE(obj)->tp_free((PyObject *)obj);
+}
+```
+
+Важное требование к функции деструктора — она не должна изменять существующие исключения. Это важно, поскольку деструкторы часто вызываются, когда интерпретатор разматывает стек Python. Если стек разматывается из-за исключения (а не обычного возврата), ничто не защищает деструкторы от обработки уже установленного исключения. Любые действия деструктора, которые могут привести к выполнению дополнительного кода Python, могут обнаружить установленное исключение. Это может вызвать misleading ошибки интерпретатора. Правильный способ защиты — сохранить активное исключение перед выполнением небезопасных действий и восстановить его после завершения, используя функции [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyErr_Fetch()</span>](https://docs.python.org/3/c-api/exceptions.html#c.PyErr_Fetch) и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyErr_Restore()</span>](https://docs.python.org/3/c-api/exceptions.html#c.PyErr_Restore).
+
+```c
+static void
+my_dealloc(PyObject *obj)
+{
+    MyObject *self = (MyObject *) obj;
+    PyObject *cbresult;
+
+    if (self->my_callback != NULL) {
+        PyObject *err_type, *err_value, *err_traceback;
+
+        /* Сохраняем текущее состояние исключения */
+        PyErr_Fetch(&err_type, &err_value, &err_traceback);
+
+        cbresult = PyObject_CallNoArgs(self->my_callback);
+        if (cbresult == NULL)
+            PyErr_WriteUnraisable(self->my_callback);
+        else
+            Py_DECREF(cbresult);
+
+        /* Восстанавливаем сохранённое состояние исключения */
+        PyErr_Restore(err_type, err_value, err_traceback);
+
+        Py_DECREF(self->my_callback);
+    }
+    Py_TYPE(obj)->tp_free((PyObject*)self);
+}
+```
+
+> **Примечание**: Существуют ограничения на безопасные операции в функции деструктора. Во-первых, если ваш тип поддерживает сборку мусора (используя [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_traverse</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_traverse) и/или [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_clear</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_clear)), некоторые члены объекта могут быть уже очищены или завершены к моменту вызова [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc). Во-вторых, в [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc) объект находится в нестабильном состоянии: его счётчик ссылок равен нулю. Любой вызов нетривиального объекта или API (как в примере выше) может привести к повторному вызову [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc), что вызовет двойное освобождение памяти и аварию. 
+> 
+> Начиная с Python 3.4, рекомендуется не размещать сложный код завершения в [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_dealloc</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dealloc), а вместо этого использовать новый метод типа [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_finalize</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_finalize).
 
 ## 3.2. Представление объекта
-Текст для подраздела 1.1.
+В Python существует два способа получить текстовое представление объекта: функция [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">repr()</span>](https://docs.python.org/3/library/functions.html#repr) и функция [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">str()</span>](https://docs.python.org/3/library/stdtypes.html#str). (Функция [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">print()</span>](https://docs.python.org/3/library/functions.html#print) просто вызывает [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">str()</span>](https://docs.python.org/3/library/stdtypes.html#str).) Оба обработчика являются необязательными.
+
+```c
+reprfunc tp_repr;
+reprfunc tp_str;
+```
+
+Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_repr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_repr) должен возвращать строковый объект с представлением экземпляра, для которого он вызывается. Простой пример:
+
+```c
+static PyObject *
+newdatatype_repr(newdatatypeobject *obj)
+{
+    return PyUnicode_FromFormat("Repr-ified_newdatatype{{size:%d}}",
+                                obj->obj_UnderlyingDatatypePtr->size);
+}
+```
+
+Если обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_repr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_repr) не указан, интерпретатор предоставит представление, использующее [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_name</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_name) типа и уникальный идентификатор объекта.
+
+Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_str</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_str) для [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">str()</span>](https://docs.python.org/3/library/stdtypes.html#str) выполняет ту же роль, что и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_repr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_repr) для [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">repr()</span>](https://docs.python.org/3/library/functions.html#repr) — он вызывается, когда код Python вызывает [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">str()</span>](https://docs.python.org/3/library/stdtypes.html#str) для экземпляра вашего объекта. Его реализация аналогична [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_repr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_repr), но возвращаемая строка предназначена для человека. Если [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_str</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_str)  не задан, вместо него будет использоваться обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_repr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_repr).
+
+Простой пример:
+
+```c
+static PyObject *
+newdatatype_str(newdatatypeobject *obj)
+{
+    return PyUnicode_FromFormat("Stringified_newdatatype{{size:%d}}",
+                                obj->obj_UnderlyingDatatypePtr->size);
+}
+```
 
 ## 3.3. Управление атрибутами
+Для любого объекта, поддерживающего атрибуты, соответствующий тип должен предоставлять функции, которые управляют способом разрешения атрибутов. Необходима функция для получения атрибутов (если они определены) и другая - для установки атрибутов (если их разрешено изменять). Удаление атрибута является особым случаем, при котором обработчику передается значение `NULL`.
+
+Python поддерживает две пары обработчиков атрибутов; тип, поддерживающий атрибуты, должен реализовать функции только для одной из пар. Разница заключается в том, что одна пара принимает имя атрибута как `char*`, а другая — как [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject</span>](https://docs.python.org/3/c-api/structures.html#c.PyObject)*. Каждый тип может использовать ту пару, которая удобнее для реализации.
+
+```c
+getattrfunc  tp_getattr;        /* вариант c char* */
+setattrfunc  tp_setattr;
+/* ... */
+getattrofunc tp_getattro;       /* вариант c PyObject* */
+setattrofunc tp_setattro;
+```
+
+Если доступ к атрибутам объекта всегда является простой операцией (это будет объяснено далее), существуют универсальные реализации, которые можно использовать для предоставления версии управления атрибутами с [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject</span>](https://docs.python.org/3/c-api/structures.html#c.PyObject)*. Необходимость в специализированных обработчиках атрибутов практически полностью исчезла, начиная с Python 2.2, хотя многие примеры ещё не были обновлены для использования новых доступных универсальных механизмов.
+
 ### 3.3.1 Управление атрибутами общего типа
+Большинство расширяемых типов используют только *простые* атрибуты. Но что делает атрибуты простыми? Есть всего несколько условий, которые должны быть выполнены:
+1. Имена атрибутов должны быть известны при вызове [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready)
+2. Не требуется специальной обработки для отслеживания факта обращения или установки атрибута, а также не нужно выполнять действия на основе его значения.
+
+Обратите внимание, что этот список не накладывает никаких ограничений на значения атрибутов, момент вычисления значений или способ хранения соответствующих данных.
+
+При вызове [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyType_Ready()</span>](https://docs.python.org/3/c-api/type.html#c.PyType_Ready) используются три таблицы, на которые ссылается объект типа, для создания [<u>дескрипторов</u>](https://docs.python.org/3/glossary.html#term-descriptor), помещаемых в словарь объекта типа. Каждый дескриптор управляет доступом к одному атрибуту объекта-экземпляра. Все таблицы являются необязательными; если все они равны `NULL`, экземпляры типа будут иметь только атрибуты, унаследованные от базового типа, и должны оставлять поля [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_getattro</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_getattro) и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_setattro</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_setattro) равными `NULL`, позволяя базовому типу обрабатывать атрибуты.
+
+Таблицы объявляются как три поля объекта типа:
+
+```c
+struct PyMethodDef *tp_methods;
+struct PyMemberDef *tp_members;
+struct PyGetSetDef *tp_getset;
+```
+
+Если [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_methods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_methods) не равен `NULL`, он должен ссылаться на массив структур [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyMethodDef</span>](https://docs.python.org/3/c-api/structures.html#c.PyMethodDef). Каждая запись в таблице представляет собой экземпляр этой структуры:
+
+```c
+typedef struct PyMethodDef {
+    const char  *ml_name;       /* имя метода */
+    PyCFunction  ml_meth;       /* функция реализации */
+    int          ml_flags;      /* флаги */
+    const char  *ml_doc;        /* строку документации */
+} PyMethodDef;
+```
+
+Для каждого метода, предоставляемого типом, должна быть определена одна запись; для методов, унаследованных от базового типа, записи не требуются. В конце массива необходима дополнительная запись-ограничитель, отмечающая конец массива. Поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">ml_name</span>](https://docs.python.org/3/c-api/structures.html#c.PyMethodDef.ml_name) ограничителя должно быть равно `NULL`.
+
+```c
+typedef struct PyMemberDef {
+    const char *name;
+    int         type;
+    int         offset;
+    int         flags;
+    const char *doc;
+} PyMemberDef;
+```
+
+Вторая таблица используется для определения атрибутов, которые напрямую соответствуют данным, хранящимся в экземпляре. Поддерживаются различные примитивные типы C, а доступ может быть только для чтения или для чтения-записи. Структуры в таблице определяются следующим образом:
+
+Для каждой записи в таблице будет создан [<u>дескриптор</u>](https://docs.python.org/3/glossary.html#term-descriptor) и добавлен к типу, который сможет извлекать значение из структуры экземпляра. Поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">type</span>](https://docs.python.org/3/c-api/structures.html#c.PyMemberDef.type) должно содержать код типа, например [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_T_INT</span>](https://docs.python.org/3/c-api/structures.html#c.Py_T_INT) или [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_T_DOUBLE</span>](https://docs.python.org/3/c-api/structures.html#c.Py_T_DOUBLE); это значение будет использоваться для определения способа преобразования между значениями Python и C. Поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">flags</span>](https://docs.python.org/3/c-api/structures.html#c.PyMemberDef.flags) хранит флаги, управляющие доступом к атрибуту: вы можете установить его в [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_READONLY</span>](https://docs.python.org/3/c-api/structures.html#c.Py_READONLY), чтобы запретить изменение атрибута из кода Python.
+
+Использование таблицы [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_members</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_members) для создания дескрипторов, используемых во время выполнения, даёт интересное преимущество: любой атрибут, определённый таким способом, может иметь связанную строку документации, просто указав текст в таблице. Приложение может использовать API интроспекции для получения дескриптора из объекта класса и извлечения строки документации через его атрибут [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_doc\_\_</span>](https://docs.python.org/3/reference/datamodel.html#type.__doc__).
+
+Как и в таблице [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_methods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_methods), требуется запись-ограничитель со значением [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">ml_name</span>](https://docs.python.org/3/c-api/structures.html#c.PyMethodDef.ml_name) равным `NULL`.
+
+### 3.3.2 Управление атрибутами для конкретного типа
+Для простоты здесь будет показана только версия с `char*`; единственное различие между версиями интерфейса с `char*` и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject</span>](https://docs.python.org/3/c-api/structures.html#c.PyObject)* заключается в типе параметра name. Этот пример делает по сути то же самое, что и обобщённый пример выше, но не использует обобщённую поддержку, добавленную в Python 2.2. Он объясняет, как вызываются функции-обработчики, чтобы при необходимости расширения их функциональности было понятно, что нужно сделать.
+
+Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_getattr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_getattr) вызывается, когда объект требует поиска атрибута. Он вызывается в тех же ситуациях, когда вызывался бы метод [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_getattr\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__getattr__) класса.
+
+Пример:
+
+```c
+static PyObject *
+newdatatype_getattr(newdatatypeobject *obj, char *name)
+{
+    if (strcmp(name, "data") == 0)
+    {
+        return PyLong_FromLong(obj->data);
+    }
+
+    PyErr_Format(PyExc_AttributeError,
+                 "'%.100s' object has no attribute '%.400s'",
+                 Py_TYPE(obj)->tp_name, name);
+    return NULL;
+}
+```
+
+Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_setattr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_setattr) вызывается, когда вызывается метод [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_setattr\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__setattr__) или [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_delattr\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__delattr__) экземпляра класса. При удалении атрибута третий параметр будет иметь значение `NULL`. Вот пример, который просто вызывает исключение; если это всё, что вам нужно, обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_setattr</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_setattr) следует установить в `NULL`.
+
+```c
+static int
+newdatatype_setattr(newdatatypeobject *obj, char *name, PyObject *v)
+{
+    PyErr_Format(PyExc_RuntimeError, "Read-only attribute: %s", name);
+    return -1;
+}
+```
 
 ## 3.4. Сравнение объектов
-Текст для подраздела 1.1.
+```c
+richcmpfunc tp_richcompare;
+```
+
+Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_richcompare</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_richcompare) вызывается при необходимости выполнения ["богатых" сравнений](https://docs.python.org/3/reference/datamodel.html#richcmpfuncs). Он аналогичен методам богатого сравнения, таким как <span style="font-family: Consolas, sans-serif;">\_\_lt\_\_()</span>, а также вызывается функциями [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_RichCompare()</span>](https://docs.python.org/3/c-api/object.html#c.PyObject_RichCompare) и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_RichCompareBool()</span>](https://docs.python.org/3/c-api/object.html#c.PyObject_RichCompareBool).
+
+Функция вызывается с двумя объектами Python и оператором (один из `Py_EQ`, `Py_NE`, `Py_LE`, `Py_GE`, `Py_LT` или `Py_GT`). Она должна сравнить объекты согласно оператору и вернуть `Py_True`/`Py_False` при успешном сравнении, `Py_NotImplemented` если сравнение не реализовано (чтобы попробовать метод другого объекта), или `NULL` при возникновении исключения.
+
+Вот пример реализации для типа данных, который считается равным, если размер внутреннего указателя совпадает:
+
+```c
+static PyObject *
+newdatatype_richcmp(newdatatypeobject *obj1, newdatatypeobject *obj2, int op)
+{
+    PyObject *result;
+    int c, size1, size2;
+
+    /* код проверки, что оба аргумента имеют тип newdatatype был опущен */
+
+    size1 = obj1->obj_UnderlyingDatatypePtr->size;
+    size2 = obj2->obj_UnderlyingDatatypePtr->size;
+
+    switch (op) {
+    case Py_LT: c = size1 <  size2; break;
+    case Py_LE: c = size1 <= size2; break;
+    case Py_EQ: c = size1 == size2; break;
+    case Py_NE: c = size1 != size2; break;
+    case Py_GT: c = size1 >  size2; break;
+    case Py_GE: c = size1 >= size2; break;
+    }
+    result = c ? Py_True : Py_False;
+    Py_INCREF(result);
+    return result;
+ }
+```
 
 ## 3.5. Поддержка абстрактных протоколов
-Текст для подраздела 1.1.
+Python поддерживает различные абстрактные "протоколы"; конкретные интерфейсы для работы с ними описаны в разделе [<u>Abstract Objects Layer</u>](https://docs.python.org/3/c-api/abstract.html#abstract).
+
+Ряд этих абстрактных интерфейсов был определён на ранних этапах разработки Python. В частности, протоколы чисел, отображений и последовательностей существуют с самого начала. Другие протоколы добавлялись со временем. Для протоколов, зависящих от нескольких обработчиков в реализации типа, старые протоколы определены как опциональные блоки обработчиков, на которые ссылается объект типа. Для новых протоколов есть дополнительные слоты в основном объекте типа, с флагом, указывающим на их наличие (флаг не означает, что слоты не-`NULL` - флаг может быть установлен, но слоты оставаться незаполненными).
+
+```c
+PyNumberMethods   *tp_as_number;
+PySequenceMethods *tp_as_sequence;
+PyMappingMethods  *tp_as_mapping;
+```
+
+Если вы хотите, чтобы ваш объект мог вести себя как число, последовательность или отображение, вам нужно указать адрес структуры, реализующей соответствующий C-тип: [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyNumberMethods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyNumberMethods), [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PySequenceMethods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PySequenceMethods) или [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyMappingMethods</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyMappingMethods). Заполнение этих структур соответствующими значениями - ваша задача. Примеры использования каждой из них можно найти в директории `Objects` исходного кода Python.
+
+```c
+hashfunc tp_hash;
+```
+
+Эта функция (если вы решите её реализовать) должна возвращать хеш-значение для экземпляра вашего типа данных. Простой пример:
+
+```c
+static Py_hash_t
+newdatatype_hash(newdatatypeobject *obj)
+{
+    Py_hash_t result;
+    result = obj->some_size + 32767 * obj->some_number;
+    if (result == -1)
+       result = -2;
+    return result;
+}
+```
+
+[<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_hash_t</span>](https://docs.python.org/3/c-api/hash.html#c.Py_hash_t) — это знаковый целочисленный тип, размер которого зависит от платформы. Возврат значения `-1` из [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_hash</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_hash) указывает на ошибку, поэтому важно избегать его возврата при успешном вычислении хеша, как показано выше.
+
+```c
+ternaryfunc tp_call;
+```
+
+Эта функция принимает три аргумента:
+1. *self* - экземпляр типа данных, для которого осуществляется вызов. Например, при вызове `obj1('hello')`, *self* будет `obj1`.
+2. *args* - кортеж с аргументами вызова. Для извлечения аргументов используйте [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyArg_ParseTuple()</span>](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTuple).
+3. *kwds* - словарь keyword-аргументов. Если он не `NULL` и вы поддерживаете keyword-аргументы, используйте [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyArg_ParseTupleAndKeywords()</span>](https://docs.python.org/3/c-api/arg.html#c.PyArg_ParseTupleAndKeywords). Если именованные аргументы не поддерживаются, а *kwds* не `NULL`, вызовите [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">TypeError</span>](https://docs.python.org/3/library/exceptions.html#TypeError) с сообщением о неподдержке именованных аргументов.
+
+
+```c
+static PyObject *
+newdatatype_call(newdatatypeobject *obj, PyObject *args, PyObject *kwds)
+{
+    PyObject *result;
+    const char *arg1;
+    const char *arg2;
+    const char *arg3;
+
+    if (!PyArg_ParseTuple(args, "sss:call", &arg1, &arg2, &arg3)) {
+        return NULL;
+    }
+    result = PyUnicode_FromFormat(
+        "Returning -- value: [%d] arg1: [%s] arg2: [%s] arg3: [%s]\n",
+        obj->obj_UnderlyingDatatypePtr->size,
+        arg1, arg2, arg3);
+    return result;
+}
+```
+
+```c
+/* Итераторы */
+getiterfunc tp_iter;
+iternextfunc tp_iternext;
+```
+
+Эти функции обеспечивают поддержку протокола итератора. Оба обработчика принимают ровно один параметр - экземпляр, для которого они вызываются, и возвращают новую ссылку. В случае ошибки они должны установить исключение и вернуть `NULL`. [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter) соответствует методу Python [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_iter\_\_()</span>](https://docs.python.org/3/reference/datamodel.html#object.__iter__), а [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext) - методу Python [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">\_\_next\_\_()</span>](https://docs.python.org/3/library/stdtypes.html#iterator.__next__).
+
+Любой [<u>итерируемый</u>](https://docs.python.org/3/glossary.html#term-iterable) объект должен реализовать обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter), возвращающий объект-итератор. Здесь действуют те же правила, что и для классов Python:
+- Для коллекций (списки, кортежи), поддерживающих несколько независимых итераторов, каждый вызов [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter) должен создавать и возвращать новый итератор.
+- Объекты с одноразовой итерацией (обычно из-за побочных эффектов, как у файловых объектов) могут реализовать [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter), возвращая новую ссылку на себя, и тогда они также должны реализовывать обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext).
+
+Любой объект-итератор должен реализовывать и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter), и [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext). Обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iter</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iter) итератора должен возвращать новую ссылку на итератор. Его обработчик [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext) должен возвращать новую ссылку на следующий объект в итерации, если таковой имеется. Если итерация достигла конца, [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext) может вернуть `NULL` без установки исключения или может установить [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">StopIteration</span>](https://docs.python.org/3/library/exceptions.html#StopIteration) в дополнение к возврату `NULL`; избегание исключения может дать немного лучшую производительность. Если происходит фактическая ошибка, [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_iternext</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_iternext) должен всегда устанавливать исключение и возвращать `NULL`.
 
 ## 3.6. Поддержка слабых ссылок
-Текст для подраздела 1.1.
+Одной из целей реализации слабых ссылок в Python является возможность участия любых типов в механизме слабых ссылок без накладных расходов для критичных к производительности объектов (таких как числа).
+
+Чтобы объект мог иметь слабые ссылки, тип расширения должен установить бит `Py_TPFLAGS_MANAGED_WEAKREF` в поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_flags</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_flags). Поле [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">tp_weaklistoffset</span>](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_weaklistoffset) следует оставить равным нулю.
+
+Вот как будет выглядеть статически объявленный объект типа
+
+```c
+static PyTypeObject TrivialType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    /* ... остальные члены опущены для краткости ... */
+    .tp_flags = Py_TPFLAGS_MANAGED_WEAKREF | ...,
+};
+```
+
+Единственное дополнительное требование — `tp_dealloc` должен очищать все слабые ссылки (вызовом [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_ClearWeakRefs()</span>](https://docs.python.org/3/c-api/weakref.html#c.PyObject_ClearWeakRefs)):
+
+```c
+static void
+Trivial_dealloc(TrivialObject *self)
+{
+    /* Сначала очищаем слабые ссылки перед вызовом деструкторов */
+    PyObject_ClearWeakRefs((PyObject *) self);
+    /* ... остальной код деструкции опущен для краткости ... */
+    Py_TYPE(self)->tp_free((PyObject *) self);
+}
+```
 
 ## 3.7. Дополнительные рекомендации
-Текст для подраздела 1.1.
+Чтобы узнать, как реализовать конкретный метод для вашего нового типа данных, возьмите исходный код [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">CPython</span>](https://docs.python.org/3/glossary.html#term-CPython). Перейдите в директорию `Objects` и выполните поиск по C-файлам, используя `tp_` плюс название нужной функции (например, `tp_richcompare`). Вы найдёте примеры реализации нужной вам функции.
+
+Когда вам нужно проверить, является ли объект конкретным экземпляром реализуемого вами типа, используйте функцию [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_TypeCheck()</span>](https://docs.python.org/3/c-api/object.html#c.PyObject_TypeCheck). Пример использования:
+
+```c
+if (!PyObject_TypeCheck(some_object, &MyType)) {
+    PyErr_SetString(PyExc_TypeError, "arg #1 not a mything");
+    return NULL;
+}
+```
 
 # 4. Сборка расширений на C и C++
 Текст для раздела 1.
