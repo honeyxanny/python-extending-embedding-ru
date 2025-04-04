@@ -3025,7 +3025,7 @@ sysconfig.get_config_var('LIBS')
 sysconfig.get_config_var('LINKFORSHARED')
 ```
 
-**Сноски**
+<span style="font-size: 21px; font-weight: 600;">Сноски</span>
 
 <a id="footnote-1"></a>[[<u>1</u>](#footnote-1-back)] Интерфейс для этой функции уже существует в стандартном модуле [os](https://docs.python.org/3/library/os.html#module-os) — он был выбран в качестве простого и наглядного примера.
 
