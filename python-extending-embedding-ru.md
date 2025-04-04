@@ -2745,24 +2745,284 @@ cl /LD /I/python/include ni.c spam.lib ../libs/pythonXY.lib
 Developer Studio добавит множество библиотек импорта, которые вам на самом деле не нужны, увеличивая размер исполняемого файла примерно на 100 КБ. Чтобы избавиться от них, используйте диалоговое окно (Project Settings Dialog), вкладку Link, чтобы указать *игнорирование стандартных библиотек*. Добавьте правильную `msvcrtxx.lib` в список библиотек.
 
 # 1. Встраивание Python в другое приложение
+Предыдущие главы обсуждали, как расширять Python, то есть как добавлять новые возможности в Python, подключая библиотеки функций на языке C. Также можно поступить наоборот: расширить ваше приложение на C/C++, встроив в него Python. Встраивание позволяет реализовать часть функциональности вашего приложения на Python вместо C или C++. Это можно использовать для разных целей; например, пользователи смогут настраивать приложение под свои нужды, написав скрипты на Python. Вы также можете использовать этот подход, если какие-то функции проще реализовать на Python.
+
+Встраивание Python похоже на его расширение, но не совсем. Разница в том, что при расширении Python главной программой приложения остается интерпретатор Python, тогда как при встраивании основная программа может вообще не быть связана с Python — вместо этого отдельные части приложения время от времени вызывают интерпретатор Python для выполнения кода.
+
+Таким образом, при встраивании Python вы предоставляете собственную основную программу. Одна из задач, которую должна выполнять эта программа — инициализация интерпретатора Python. Как минимум, необходимо вызвать функцию [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_Initialize()</span>](https://docs.python.org/3/c-api/init.html#c.Py_Initialize). Также можно передать интерпретатору аргументы командной строки с помощью дополнительных вызовов. После этого вы сможете обращаться к интерпретатору из любой части приложения.
+
+Существует несколько различных способов вызова интерпретатора: вы можете передать строку с инструкциями Python в функцию [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyRun_SimpleString()</span>](https://docs.python.org/3/c-api/veryhigh.html#c.PyRun_SimpleString) или передать файловый указатель stdio и имя файла (только для идентификации в сообщениях об ошибках) в функцию [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyRun_SimpleFile()</span>](https://docs.python.org/3/c-api/veryhigh.html#c.PyRun_SimpleFile). Также можно использовать низкоуровневые операции, описанные в предыдущих главах, для создания и работы с объектами Python.
 
 ## 1.1. Встраивание на очень высоком уровне
-Текст для подраздела 1.1.
+Самая простая форма встраивания Python — использование интерфейса высокого уровня. Этот интерфейс предназначен для выполнения скрипта Python без необходимости прямого взаимодействия с приложением. Например, его можно использовать для выполнения операций с файлом.
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+int
+main(int argc, char *argv[])
+{
+    PyStatus status;
+    PyConfig config;
+    PyConfig_InitPythonConfig(&config);
+
+    /* необязательно,  но рекомендуется */
+    status = PyConfig_SetBytesString(&config, &config.program_name, argv[0]);
+    if (PyStatus_Exception(status)) {
+        goto exception;
+    }
+
+    status = Py_InitializeFromConfig(&config);
+    if (PyStatus_Exception(status)) {
+        goto exception;
+    }
+    PyConfig_Clear(&config);
+
+    PyRun_SimpleString("from time import time,ctime\n"
+                       "print('Today is', ctime(time()))\n");
+    if (Py_FinalizeEx() < 0) {
+        exit(120);
+    }
+    return 0;
+
+  exception:
+     PyConfig_Clear(&config);
+     Py_ExitStatusException(status);
+}
+```
+
+> **Примечание**: `#define PY_SSIZE_T_CLEAN` использовался для указания, что в некоторых API следует применять Py_ssize_t вместо `int`. Начиная с Python 3.13, это больше не требуется, но макрос оставлен для обратной совместимости. Описание этого макроса см. в разделе [<u>Strings and buffers</u>](https://docs.python.org/3/c-api/arg.html#arg-parsing-string-and-buffers).
+
+Установка [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyConfig.program_name</span>](https://docs.python.org/3/c-api/init_config.html#c.PyConfig.program_name) должна выполняться до вызова [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_InitializeFromConfig()</span>](https://docs.python.org/3/c-api/init.html#c.Py_InitializeFromConfig), чтобы сообщить интерпретатору пути к библиотекам Python. Затем интерпретатор инициализируется с помощью [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_Initialize()</span>](https://docs.python.org/3/c-api/init.html#c.Py_Initialize), после чего выполняется встроенный Python-скрипт, выводящий дату и время. Далее вызов [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_FinalizeEx()</span>](https://docs.python.org/3/c-api/init.html#c.Py_FinalizeEx) завершает работу интерпретатора, и программа завершается.В реальной программе Python-скрипт может быть получен из другого источника, например, из текстового редактора, файла или базы данных. Загрузка кода Python из файла удобнее с использованием функции [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyRun_SimpleFile()</span>](https://docs.python.org/3/c-api/veryhigh.html#c.PyRun_SimpleFile), которая избавляет от необходимости выделять память и загружать содержимое файла вручную.
 
 ## 1.2. За пределами встраивания на очень высоком уровне: обзор
-Текст для подраздела 1.1.
+Интерфейс высокого уровня позволяет выполнять произвольные фрагменты Python-кода из приложения, но обмен данными между ними, мягко говоря, довольно неудобен. Если вам нужен такой обмен, следует использовать низкоуровневые вызовы. Ценой написания большего объёма C-кода можно добиться практически чего угодно.
+
+Следует отметить, что расширение Python и встраивание Python — это, по сути, одно и то же действие, несмотря на разницу в целях. Большинство тем, рассмотренных в предыдущих главах, остаются актуальными. Чтобы проиллюстрировать это, рассмотрим, что на самом деле делает код расширения от Python к C:
+
+1. Преобразует значения данных из Python в C,
+2. Выполняет вызов функции в C-коде с использованием преобразованных значений,
+3. Конвертирует результаты вызова из C обратно в Python.
+   
+При встраивании Python интерфейсный код выполняет:
+
+1. Преобразование данных из C в Python,
+2. Вызов функции Python-интерфейса с преобразованными значениями,
+3. Конвертацию возвращаемых данных из Python обратно в C.
+   
+Как видите, шаги преобразования данных просто меняются местами, чтобы учесть разное направление передачи между языками. Единственное отличие заключается в вызываемой процедуре между двумя преобразованиями данных. При расширении вы вызываете функцию на C, а при встраивании - функцию Python.
+
+В этой главе не рассматривается преобразование данных между Python и C. Также предполагается, что читатель уже знаком с корректным использованием ссылок и обработкой ошибок. Поскольку эти аспекты не отличаются от расширения интерпретатора, за дополнительной информацией можно обратиться к предыдущим главам.
 
 ## 1.3. Чистое встраивание
-Текст для подраздела 1.1.
+Первая программа предназначена для выполнения функции в Python-скрипте. Как и в разделе об интерфейсе очень высокого уровня, интерпретатор Python не взаимодействует напрямую с приложением (но это изменится в следующем разделе).
+
+Код для выполнения функции, определённой в Python-скрипте:
+
+```c
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+int
+main(int argc, char *argv[])
+{
+    PyObject *pName, *pModule, *pFunc;
+    PyObject *pArgs, *pValue;
+    int i;
+
+    if (argc < 3) {
+        fprintf(stderr,"Usage: call pythonfile funcname [args]\n");
+        return 1;
+    }
+
+    Py_Initialize();
+    pName = PyUnicode_DecodeFSDefault(argv[1]);
+    /* Проверка ошибок pName опущена */
+
+    pModule = PyImport_Import(pName);
+    Py_DECREF(pName);
+
+    if (pModule != NULL) {
+        pFunc = PyObject_GetAttrString(pModule, argv[2]);
+        /* pFunc является новой ссылкой */
+
+        if (pFunc && PyCallable_Check(pFunc)) {
+            pArgs = PyTuple_New(argc - 3);
+            for (i = 0; i < argc - 3; ++i) {
+                pValue = PyLong_FromLong(atoi(argv[i + 3]));
+                if (!pValue) {
+                    Py_DECREF(pArgs);
+                    Py_DECREF(pModule);
+                    fprintf(stderr, "Cannot convert argument\n");
+                    return 1;
+                }
+                /* Ссылка pValue "украдена" здесь: */
+                PyTuple_SetItem(pArgs, i, pValue);
+            }
+            pValue = PyObject_CallObject(pFunc, pArgs);
+            Py_DECREF(pArgs);
+            if (pValue != NULL) {
+                printf("Result of call: %ld\n", PyLong_AsLong(pValue));
+                Py_DECREF(pValue);
+            }
+            else {
+                Py_DECREF(pFunc);
+                Py_DECREF(pModule);
+                PyErr_Print();
+                fprintf(stderr,"Call failed\n");
+                return 1;
+            }
+        }
+        else {
+            if (PyErr_Occurred())
+                PyErr_Print();
+            fprintf(stderr, "Cannot find function \"%s\"\n", argv[2]);
+        }
+        Py_XDECREF(pFunc);
+        Py_DECREF(pModule);
+    }
+    else {
+        PyErr_Print();
+        fprintf(stderr, "Failed to load \"%s\"\n", argv[1]);
+        return 1;
+    }
+    if (Py_FinalizeEx() < 0) {
+        return 120;
+    }
+    return 0;
+}
+```
+
+Этот код загружает Python-скрипт, используя `argv[1]`, и вызывает функцию, указанную в `argv[2]`. Целочисленные аргументы функции берутся из остальных значений массива `argv`. Если [скомпилировать и "слинковать"](https://docs.python.org/3/extending/embedding.html#compiling) эту программу (назовём полученный исполняемый файл, например, **call**), то с её помощью можно выполнять Python-скрипты. Например:
+
+```python
+def multiply(a,b):
+    print("Will compute", a, "times", b)
+    c = 0
+    for i in range(0, a):
+        c = c + b
+    return c
+```
+
+тогда результат будет:
+
+```sh
+call multiply multiply 3 2
+Will compute 3 times 2
+Result of call: 6
+```
+
+Несмотря на относительно большой объём кода для выполняемой функциональности, бо́льшая его часть отвечает за преобразование данных между Python и C, а также за обработку ошибок. Наиболее интересная часть, касающаяся встраивания Python, начинается с
+
+```c
+Py_Initialize();
+pName = PyUnicode_DecodeFSDefault(argv[1]);
+/* Проверка ошибок pName опущена */
+pModule = PyImport_Import(pName);
+```
+
+После инициализации интерпретатора скрипт загружается с помощью функции [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyImport_Import()</span>](https://docs.python.org/3/c-api/import.html#c.PyImport_Import). Для этого требуется строка Python в качестве аргумента, которая создаётся с использованием функции преобразования данных [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyUnicode_DecodeFSDefault()</span>](https://docs.python.org/3/c-api/unicode.html#c.PyUnicode_DecodeFSDefault).
+
+```c
+pFunc = PyObject_GetAttrString(pModule, argv[2]);
+/* pFunc является новой ссылкой */
+
+if (pFunc && PyCallable_Check(pFunc)) {
+    ...
+}
+Py_XDECREF(pFunc);
+```
+
+После загрузки скрипта искомое имя можно получить с помощью [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">PyObject_GetAttrString()</span>](https://docs.python.org/3/c-api/object.html#c.PyObject_GetAttrString). Если имя существует и возвращённый объект является вызываемым, можно с уверенностью предположить, что это функция. Затем программа создаёт кортеж аргументов стандартным способом. Вызов Python-функции осуществляется следующим образом:
+
+```c
+pValue = PyObject_CallObject(pFunc, pArgs);
+```
+
+После выполнения функции, `pValue` будет содержать либо `NULL`, либо ссылку на возвращаемое значение. Важно не забыть освободить эту ссылку после проверки значения.
 
 ## 1.4. Расширение встроенного Python
-Текст для подраздела 1.1.
+До этого момента встроенный интерпретатор Python не имел доступа к функциональности самого приложения. Python API позволяет это исправить путем расширения встроенного интерпретатора - то есть добавления в него функций, предоставляемых приложением. Хотя это звучит сложно, на практике всё не так страшно. Просто временно забудьте, что приложение запускает интерпретатор Python. Вместо этого представьте, что приложение - это набор подпрограмм, и напишите связующий код, который предоставит Python доступ к этим подпрограммам, точно так же, как вы писали бы обычное расширение для Python. Например:
+
+```c
+static int numargs=0;
+
+/* Возвращаем количество аргументов переданных через командную строку */
+static PyObject*
+emb_numargs(PyObject *self, PyObject *args)
+{
+    if(!PyArg_ParseTuple(args, ":numargs"))
+        return NULL;
+    return PyLong_FromLong(numargs);
+}
+
+static PyMethodDef EmbMethods[] = {
+    {"numargs", emb_numargs, METH_VARARGS,
+     "Return the number of arguments received by the process."},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyModuleDef EmbModule = {
+    PyModuleDef_HEAD_INIT, "emb", NULL, -1, EmbMethods,
+    NULL, NULL, NULL, NULL
+};
+
+static PyObject*
+PyInit_emb(void)
+{
+    return PyModule_Create(&EmbModule);
+}
+```
+
+Добавьте приведённый выше код непосредственно перед функцией <span style="font-family: Consolas, sans-serif;text-decoration: underline;">main()</span>. Также вставьте следующие две строки перед вызовом [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">Py_Initialize()</span>](https://docs.python.org/3/c-api/init.html#c.Py_Initialize):
+
+```c
+numargs = argc;
+PyImport_AppendInittab("emb", &PyInit_emb);
+```
+
+Эти две строки инициализируют переменную `numargs` и делают функцию <span style="font-family: Consolas, sans-serif;text-decoration: underline;">emb.numargs()</span> доступной для встроенного интерпретатора Python. С такими расширениями Python-скрипт может выполнять такие операции, как:
+
+```python
+import emb
+print("Number of arguments", emb.numargs())
+```
+
+В реальном приложении эти методы будут предоставлять API приложения для Python.
 
 ## 1.5. Встраивание Python в C++
-Текст для подраздела 1.1.
+Встраивание Python в программу на C++ также возможно. Точный способ реализации зависит от используемой C++ системы. В общем случае вам потребуется написать основную программу на C++ и использовать компилятор C++ для компиляции и "линковки" вашей программы. Не требуется перекомпилировать сам Python с использованием C++.
 
 ## 1.6. Компиляция и компоновка в Unix-подобных системах
-Текст для подраздела 1.1.
+Не всегда просто подобрать правильные флаги для компилятора (и линковщика), чтобы встроить интерпретатор Python в ваше приложение. Особенно это сложно, потому что Python требуется загружать библиотечные модули, реализованные как C-расширения (`.so` файлы), которые должны быть слинкованы с ним.
+
+Чтобы определить необходимые флаги компилятора и линковщика, вы можете выполнить скрипт `pythonX.Y-config`, который создаётся в процессе установки (также может быть доступен скрипт `python3-config`). Этот скрипт имеет несколько опций, из которых вам непосредственно пригодятся следующие:
+
+- `pythonX.Y-config --cflags` выведет рекомендуемые флаги для компиляции
+   
+```sh
+/opt/bin/python3.11-config --cflags
+-I/opt/include/python3.11 -I/opt/include/python3.11 -Wsign-compare  -DNDEBUG -g -fwrapv -O3 -Wall
+```
+
+- `pythonX.Y-config --ldflags --embed` выведет рекомендованные флаги для "линковки"
+
+```sh
+/opt/bin/python3.11-config --ldflags --embed
+-L/opt/lib/python3.11/config-3.11-x86_64-linux-gnu -L/opt/lib -lpython3.11 -lpthread -ldl  -lutil -lm
+```
+
+> **Примечание**: Во избежание путаницы между разными установками Python (особенно между системной версией Python и вашей собственной скомпилированной версией), рекомендуется использовать абсолютный путь к `pythonX.Y-config`, как показано в примере выше.
+
+Если эта процедура не сработала (она не гарантированно работает на всех Unix-подобных платформах, однако мы приветствуем [<u>сообщения об ошибках</u>](https://docs.python.org/3/bugs.html#reporting-bugs)), вам придётся изучить документацию вашей системы о динамической компоновке и/или изучить `Makefile` Python (используйте [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">sysconfig.get_makefile_filename()</span>](https://docs.python.org/3/library/sysconfig.html#sysconfig.get_makefile_filename) для определения его местоположения) и параметры компиляции. В этом случае модуль [<span style="font-family: Consolas, sans-serif;text-decoration: underline;">sysconfig</span>](https://docs.python.org/3/library/sysconfig.html#module-sysconfig) является полезным инструментом для программного извлечения конфигурационных значений, которые вы захотите объединить. Например:
+
+```python
+import sysconfig
+sysconfig.get_config_var('LIBS')
+
+sysconfig.get_config_var('LINKFORSHARED')
+```
 
 **Сноски**
 
